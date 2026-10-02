@@ -125,7 +125,7 @@ class ScheduledQuizManager:
 
             await safe_send_message(
                 ctx, chat_id,
-                f"\U0001F3AF <b>Scheduled Quiz Starting!</b>\n\nQuiz ID: <code>{qid}</code>\n"
+                f"🎯 <b>Scheduled Quiz Starting!</b>\n\nQuiz ID: <code>{qid}</code>\n"
                 f"Started at: {datetime.now(IST).strftime('%I:%M %p')}\n"
                 f"⏱ Timer: {quiz.get('timer', 30)}s | Questions: {len(quiz.get('questions', []))}",
                 parse_mode=ParseMode.HTML,
@@ -162,19 +162,19 @@ async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         try:
             member = await ctx.bot.get_chat_member(chat_id, user_id)
             if member.status not in ("administrator", "creator"):
-                await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+                await safe_send_message(ctx, chat_id, "🚫 Admin only.")
                 return
         except Exception:
             return
 
         if not await is_premium_user(user_id):
-            await safe_send_message(ctx, chat_id, "\U0001F512 Premium required for scheduling.")
+            await safe_send_message(ctx, chat_id, "🔒 Premium required for scheduling.")
             return
 
         if len(ctx.args) < 2:
             await safe_send_message(
                 ctx, chat_id,
-                "\U0001F4C5 Usage: <code>/schedule QUIZ_ID HH:MM</code>\nExample: <code>/schedule ABC123 14:30</code>",
+                "📅 Usage: <code>/schedule QUIZ_ID HH:MM</code>\nExample: <code>/schedule ABC123 14:30</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -206,8 +206,8 @@ async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         mins, _ = divmod(rem, 60)
         await safe_send_message(
             ctx, chat_id,
-            f"✅ <b>Scheduled!</b>\n\n\U0001F4DD {quiz.get('quiz_name', 'Quiz')}\n"
-            f"\U0001F550 {sched_time.strftime('%I:%M %p, %d %b')}\n⏱️ In {hrs}h {mins}m",
+            f"✅ <b>Scheduled!</b>\n\n📝 {quiz.get('quiz_name', 'Quiz')}\n"
+            f"🕥 {sched_time.strftime('%I:%M %p, %d %b')}\n⏱️ In {hrs}h {mins}m",
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
@@ -224,12 +224,12 @@ async def viewschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
         schedules = await schedule_mgr.get_for_chat(chat_id)
         if not schedules:
-            await safe_send_message(ctx, chat_id, "\U0001F4C5 No scheduled quizzes.")
+            await safe_send_message(ctx, chat_id, "📅 No scheduled quizzes.")
             return
 
         schedules.sort(key=lambda x: x["scheduled_time"])
         now = datetime.now(IST)
-        text = "\U0001F4C5 <b>Scheduled Quizzes</b>\n\n"
+        text = "📅 <b>Scheduled Quizzes</b>\n\n"
         for i, s in enumerate(schedules, 1):
             diff = s["scheduled_time"] - now
             if diff.total_seconds() > 0:
@@ -238,7 +238,7 @@ async def viewschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
                 until = f"{h}h {m}m"
             else:
                 until = "Starting soon..."
-            text += f"{i}. <code>{s['quiz_id']}</code>\n   \U0001F550 {s['scheduled_time'].strftime('%I:%M %p, %d %b')} (in {until})\n\n"
+            text += f"{i}. <code>{s['quiz_id']}</code>\n   🕥 {s['scheduled_time'].strftime('%I:%M %p, %d %b')} (in {until})\n\n"
         await safe_send_message(ctx, chat_id, text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error("viewschedule_command error: %s", e)
@@ -256,7 +256,7 @@ async def cancelschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         try:
             member = await ctx.bot.get_chat_member(chat_id, user_id)
             if member.status not in ("administrator", "creator"):
-                await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+                await safe_send_message(ctx, chat_id, "🚫 Admin only.")
                 return
         except Exception:
             return
