@@ -1,4 +1,4 @@
-""""
+"""
 Advance Quiz Bot — Open Source Project
 This project was originally developed by Gagan (github.com/devgaganin).
 Reference: https://t.me/advance_quiz_bot
@@ -88,7 +88,7 @@ async def show_correct_mark_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int)
     ])
     msg = await safe_send_message(
         ctx, chat_id,
-        f"\U0001F3AF <b>Correct mark per question?</b>\n\nOr tap <b>⚡ Quick Start</b> to launch immediately with {qs_desc}.",
+        f"🎯 <b>Correct mark per question?</b>\n\nOr tap <b>⚡ Quick Start</b> to launch immediately with {qs_desc}.",
         parse_mode=ParseMode.HTML, reply_markup=kb,
     )
     if msg and chat_id in pending_quiz_settings:
@@ -108,12 +108,12 @@ async def _show_neg_mark_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, co
 
 async def _show_shuffle_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("\U0001F500 Questions", callback_data=f"qs_sh_{chat_id}_q"),
-         InlineKeyboardButton("\U0001F500 Options", callback_data=f"qs_sh_{chat_id}_o"),
-         InlineKeyboardButton("\U0001F500 Both", callback_data=f"qs_sh_{chat_id}_b")],
+        [InlineKeyboardButton("🔀 Questions", callback_data=f"qs_sh_{chat_id}_q"),
+         InlineKeyboardButton("🔀 Options", callback_data=f"qs_sh_{chat_id}_o"),
+         InlineKeyboardButton("🔀 Both", callback_data=f"qs_sh_{chat_id}_b")],
         [InlineKeyboardButton("⏭ No Shuffle", callback_data=f"qs_sh_{chat_id}_skip")],
     ])
-    await _setup_edit(ctx, chat_id, "\U0001F500 <b>Shuffle?</b>", kb)
+    await _setup_edit(ctx, chat_id, "🔀 <b>Shuffle?</b>", kb)
 
 
 async def _show_shuffle_count_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -124,7 +124,7 @@ async def _show_shuffle_count_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: in
     ])
     await _setup_edit(
         ctx, chat_id,
-        "\U0001F500 <b>Shuffle how many options?</b>\nOnly the first N option positions will be "
+        "🔀 <b>Shuffle how many options?</b>\nOnly the first N option positions will be "
         "shuffled among themselves — the rest stay put.",
         kb,
     )
@@ -134,11 +134,12 @@ async def _show_timer_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> No
     ps = pending_quiz_settings.get(chat_id, {})
     quiz_default = ps.get("quiz", {}).get("timer", 30)
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t}s", callback_data=f"qs_tm_{chat_id}_{t}") for t in (10, 15, 20)],
-        [InlineKeyboardButton(f"{t}s", callback_data=f"qs_tm_{chat_id}_{t}") for t in (25, 30, 40)],
+        [InlineKeyboardButton(f"{t}s", callback_data=f"qs_tm_{chat_id}_{t}") for t in (15, 30, 45)],
+        [InlineKeyboardButton(f"{t}s", callback_data=f"qs_tm_{chat_id}_{t}") for t in (60, 90, 120)],
+        [InlineKeyboardButton(f"{t // 60}m", callback_data=f"qs_tm_{chat_id}_{t}") for t in (180, 240)],
         [InlineKeyboardButton(f"⏭ Quiz default ({quiz_default}s)", callback_data=f"qs_tm_{chat_id}_default")],
     ])
-    await _setup_edit(ctx, chat_id, "⏱ <b>Timer per question?</b>\n\nSelect a time — Start button will appear after.", kb)
+    await _setup_edit(ctx, chat_id, "⏱ <b>Timer per question?</b>\n\nSelect a time (up to 4 minutes) — Start button will appear after.", kb)
 
 
 async def _show_start_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, timer_label: str) -> None:
@@ -153,7 +154,7 @@ async def _show_explanation_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int)
     ])
     await _setup_edit(
         ctx, chat_id,
-        "\U0001F4A1 <b>Show explanation after each question?</b>\n\n"
+        "💡 <b>Show explanation after each question?</b>\n\n"
         "If Yes, the explanation will be sent as a separate message after each poll closes.",
         kb,
     )
@@ -166,7 +167,7 @@ async def _show_anticheat_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -
     ])
     await _setup_edit(
         ctx, chat_id,
-        "\U0001F6E1 <b>Anti-Cheat Detection?</b>\n\n"
+        "🛡 <b>Anti-Cheat Detection?</b>\n\n"
         "<i>⚠️ Warning: Users found using a double/duplicate account to cheat will be auto-kicked "
         "from the group.\nFalse positives possible — enable only if needed.</i>",
         kb,
@@ -178,7 +179,9 @@ async def _show_section_mode_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int
     ps = pending_quiz_settings.get(chat_id, {})
     sections = ps.get("quiz", {}).get("sections", [])
     if not sections:
-        await _show_start_prompt(ctx, chat_id, f"{ps.get('timer_override') or ps.get('quiz', {}).get('timer', 30)}s")
+        t_val = ps.get('timer_override') or ps.get('quiz', {}).get('timer', 30)
+        t_lbl = f"{t_val // 60}m" if t_val >= 60 else f"{t_val}s"
+        await _show_start_prompt(ctx, chat_id, t_lbl)
         return
 
     sec_settings = ps.setdefault("section_settings", {})
@@ -192,12 +195,19 @@ async def _show_section_mode_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int
                 summary += f"• {sec.get('name', '?')}: quiz defaults\n"
             else:
                 mode = cfg.get("mode", "perpoll")
-                t_lbl = f"{cfg.get('slot_minutes', '?')}min slot" if mode == "slot" else f"{cfg.get('timer', 'default')}s/poll"
+                if mode == "slot":
+                    t_lbl = f"{cfg.get('slot_minutes', '?')}min slot"
+                else:
+                    raw_t = cfg.get('timer')
+                    if raw_t:
+                        t_lbl = f"{raw_t // 60}m/poll" if raw_t >= 60 else f"{raw_t}s/poll"
+                    else:
+                        t_lbl = "default"
                 cm_lbl = cfg.get("correct_mark") or "global"
                 neg_lbl = cfg.get("neg_mark") if cfg.get("neg_mark") is not None else "global"
                 summary += f"• {sec.get('name', '?')}: {t_lbl}  +{cm_lbl}/-{neg_lbl}\n"
         await _setup_edit(
-            ctx, chat_id, summary + "\nPress <b>▶️ Start</b> when ready!",
+            ctx, chat_id, summary + "\nPress <b>▶️️ Start</b> when ready!",
             InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start Quiz", callback_data=f"qs_tm_{chat_id}_start")]]),
         )
         return
@@ -209,30 +219,31 @@ async def _show_section_mode_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int
 
     await _setup_edit(
         ctx, chat_id,
-        f"\U0001F4DA <b>{sec_name}</b>  ({progress})\nQ{s}–{e}  ({e - s} questions)\n\nChoose <b>timing mode</b> for this section:",
+        f"📚 <b>{sec_name}</b>  ({progress})\nQ{s}–{e}  ({e - s} questions)\n\nChoose <b>timing mode</b> for this section:",
         InlineKeyboardMarkup([
             [InlineKeyboardButton("⏱ Per-poll timer (Case 1)", callback_data=f"qs_sec_{chat_id}_{next_idx}_mode_perpoll"),
-             InlineKeyboardButton("\U0001F550 Whole-section slot (Case 2)", callback_data=f"qs_sec_{chat_id}_{next_idx}_mode_slot")],
+             InlineKeyboardButton("⏱️ Whole-section slot (Case 2)", callback_data=f"qs_sec_{chat_id}_{next_idx}_mode_slot")],
             [InlineKeyboardButton("⏭ Keep quiz defaults", callback_data=f"qs_sec_{chat_id}_{next_idx}_mode_skip")],
         ]),
     )
 
 
 async def _show_sec_timer_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, sec_idx: int, mode: str) -> None:
-    mode_lbl = "\U0001F550 Slot mode" if mode == "slot" else "⏱ Per-poll mode"
+    mode_lbl = "⏱️ Slot mode" if mode == "slot" else "⏱ Per-poll mode"
     if mode == "slot":
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{m} min", callback_data=f"qs_sec_{chat_id}_{sec_idx}_slotmin_{m}") for m in (10, 15, 20)],
             [InlineKeyboardButton(f"{m} min", callback_data=f"qs_sec_{chat_id}_{sec_idx}_slotmin_{m}") for m in (25, 30, 45)],
             [InlineKeyboardButton("60 min", callback_data=f"qs_sec_{chat_id}_{sec_idx}_slotmin_60")],
         ])
-        await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n\U0001F550 <b>Total slot duration for this section?</b>", kb)
+        await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n⏱️ <b>Total slot duration for this section?</b>", kb)
     else:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{t}s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_{t}") for t in (10, 15, 20, 25, 30)],
+            [InlineKeyboardButton(f"{t}s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_{t}") for t in (30, 60, 90)],
+            [InlineKeyboardButton(f"{t}s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_{t}") for t in (120, 180, 240)],
             [InlineKeyboardButton("⏭ Quiz default", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_skip")],
         ])
-        await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n⏱ <b>Per-poll timer for this section?</b>", kb)
+        await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n⏱ <b>Per-poll timer for this section (up to 4 mins)?</b>", kb)
 
 
 async def _show_sec_marks_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, sec_idx: int) -> None:
@@ -245,7 +256,8 @@ async def _show_sec_marks_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, s
     if sec_cfg.get("slot_minutes"):
         timer_lbl = f"{sec_cfg['slot_minutes']} min slot"
     elif sec_cfg.get("timer"):
-        timer_lbl = f"{sec_cfg['timer']}s per poll"
+        raw_t = sec_cfg['timer']
+        timer_lbl = f"{raw_t // 60}m per poll" if raw_t >= 60 else f"{raw_t}s per poll"
     else:
         timer_lbl = "quiz default timer"
     await _setup_edit(ctx, chat_id, f"✅ Timer: {timer_lbl}\n\n✅ <b>Correct mark for this section?</b>", kb)
@@ -330,7 +342,7 @@ async def quiz_setup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
         elif step == "ac":
             ps["anti_cheat"] = value == "yes"
-            await query.edit_message_text(f"\U0001F6E1 Anti-Cheat: {'✅ Enabled' if ps['anti_cheat'] else '❌ Disabled'}")
+            await query.edit_message_text(f"🛡 Anti-Cheat: {'✅ Enabled' if ps['anti_cheat'] else '❌ Disabled'}")
             await _show_timer_prompt(ctx, chat_id)
 
         elif step == "sec":
@@ -346,7 +358,7 @@ async def quiz_setup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
         elif step == "tm":
             if value == "start":
-                await query.edit_message_text("\U0001F680 Starting quiz...")
+                await query.edit_message_text("🚀 Starting quiz...")
                 await _launch_quiz_from_settings(chat_id, ctx, ps)
                 del pending_quiz_settings[chat_id]
             elif value == "default":
@@ -354,8 +366,10 @@ async def quiz_setup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                 await query.edit_message_text("✅ Timer: quiz default")
                 await _show_section_mode_prompt(ctx, chat_id)
             else:
-                ps["timer_override"] = int(value)
-                await query.edit_message_text(f"✅ Timer: {value}s")
+                secs = int(value)
+                ps["timer_override"] = secs
+                lbl = f"{secs // 60}m" if secs >= 60 else f"{secs}s"
+                await query.edit_message_text(f"✅ Timer: {lbl}")
                 await _show_section_mode_prompt(ctx, chat_id)
     except Exception as e:
         logger.error("quiz_setup_callback error: %s", e, exc_info=True)
@@ -436,9 +450,9 @@ async def _handle_anon_verify(query, ctx: ContextTypes.DEFAULT_TYPE, parts: list
     allowed, batch = await resolve_quiz_access(anon_qid, quiz, anon_chat_id, "group", real_user_id, ctx=ctx)
     if not allowed:
         if batch:
-            msg = f"\U0001F512 <b>Paid Quiz — Access Required</b>\n\n\U0001F4E6 Batch: <b>{batch.get('name', '')}</b>\n"
+            msg = f"🔒 <b>Paid Quiz — Access Required</b>\n\n📦 Batch: <b>{batch.get('name', '')}</b>\n"
             if batch.get("payment_link"):
-                msg += f"\n\U0001F4B3 <b>Pay here:</b> {batch['payment_link']}\n"
+                msg += f"\n💳 <b>Pay here:</b> {batch['payment_link']}\n"
             await safe_send_message(ctx, anon_chat_id, msg, parse_mode=ParseMode.HTML)
         else:
             await safe_send_message(ctx, anon_chat_id, f"❌ Contact creator ID {quiz.get('creator_id')} for access.")
@@ -545,6 +559,7 @@ async def _launch_quiz_from_settings(chat_id: int, ctx: ContextTypes.DEFAULT_TYP
 async def _send_start_card(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: dict, skip: int, chat_type: str) -> None:
     total_q = len(quiz["questions"])
     timer = quiz["timer"]
+    timer_str = f"{timer // 60}m" if timer >= 60 else f"{timer}s"
     neg = quiz.get("negative_marking", 0)
     cm = quiz.get("correct_mark", 1)
     sections = quiz.get("sections", [])
@@ -555,27 +570,29 @@ async def _send_start_card(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: d
     shuffle_o = "✅" if quiz.get("shuffle_options") else "❌"
     neg_str = f"-{neg}" if neg else "None"
 
-    card = f"\U0001F3AF <b>{quiz.get('quiz_name', 'Quiz')}</b>\n{'─' * 30}\n\U0001F4CB <b>Questions:</b> {total_q}"
+    card = f"🎯 <b>{quiz.get('quiz_name', 'Quiz')}</b>\n{'─' * 30}\n📋 <b>Questions:</b> {total_q}"
     if skip:
         card += f" <i>(starting from Q{skip + 1})</i>"
-    card += f"\n⏱ <b>Timer:</b> {timer}s per question"
+    card += f"\n⏱ <b>Timer:</b> {timer_str} per question"
     if sections:
-        card += f"\n\U0001F4C2 <b>Sections:</b> {len(sections)}"
+        card += f"\n📂 <b>Sections:</b> {len(sections)}"
         for sec in sections:
             r = sec.get("question_range", (0, 0))
-            card += f"\n   • {sec.get('name', '?')} — Q{r[0]}–{r[1]} ({sec.get('timer', timer)}s)"
+            sec_t = sec.get("timer", timer)
+            sec_t_str = f"{sec_t // 60}m" if sec_t >= 60 else f"{sec_t}s"
+            card += f"\n    • {sec.get('name', '?')} — Q{r[0]}–{r[1]} ({sec_t_str})"
     card += (
         f"\n✅ <b>Correct mark:</b> +{cm}\n➖ <b>Negative:</b> {neg_str}\n"
-        f"\U0001F500 <b>Shuffle Q:</b> {shuffle_q}  |  <b>Options:</b> {shuffle_o}\n"
-        f"\U0001F4A1 <b>Show explanation:</b> {'✅ Yes' if quiz.get('show_explanation') else '❌ No'}"
+        f"🔀 <b>Shuffle Q:</b> {shuffle_q}  |  <b>Options:</b> {shuffle_o}\n"
+        f"💡 <b>Show explanation:</b> {'✅ Yes' if quiz.get('show_explanation') else '❌ No'}"
     )
     if chat_type in ("group", "supergroup"):
-        card += f"\n\U0001F6E1 <b>Anti-Cheat:</b> {'✅ On' if quiz.get('anti_cheat') else '❌ Off'}"
+        card += f"\n🛡 <b>Anti-Cheat:</b> {'✅ On' if quiz.get('anti_cheat') else '❌ Off'}"
     if has_multi:
-        card += "\n\U0001F522 <b>Multi-correct</b> questions included"
+        card += "\n🔢 <b>Multi-correct</b> questions included"
     if quiz.get("promo_message"):
-        card += "\n\U0001F4E2 <i>Promo messages enabled</i>"
-    card += f"\n{'─' * 30}\n\U0001F680 <b>Starting now — good luck!</b>"
+        card += "\n📢 <i>Promo messages enabled</i>"
+    card += f"\n{'─' * 30}\n🚀 <b>Starting now — good luck!</b>"
 
     await safe_send_message(ctx, chat_id, card, parse_mode=ParseMode.HTML)
 
