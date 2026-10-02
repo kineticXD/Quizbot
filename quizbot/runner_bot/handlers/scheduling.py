@@ -34,12 +34,17 @@ class ScheduledQuizManager:
     """Tracks pending scheduled-quiz jobs and drives their launch via the
     shared AsyncIOScheduler instance."""
 
-    def __init__(self, scheduler: AsyncIOScheduler) -> None:
+    def __init__(self, scheduler: AsyncIOScheduler | None = None) -> None:
         self.scheduler = scheduler
         self.jobs: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
+    def set_scheduler(self, scheduler: AsyncIOScheduler) -> None:
+        self.scheduler = scheduler
+
     async def add(self, chat_id: int, qid: str, scheduled_time: datetime, created_by: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
+        if not self.scheduler:
+            raise RuntimeError("Scheduler is not initialized in ScheduledQuizManager.")
         async with self._lock:
             job_id = f"quiz_{chat_id}_{qid}_{int(scheduled_time.timestamp())}"
             self.scheduler.add_job(
@@ -56,10 +61,11 @@ class ScheduledQuizManager:
         async with self._lock:
             if job_id not in self.jobs:
                 return False
-            try:
-                self.scheduler.remove_job(job_id)
-            except Exception:
-                pass
+            if self.scheduler:
+                try:
+                    self.scheduler.remove_job(job_id)
+                except Exception:
+                    pass
             del self.jobs[job_id]
             return True
 
@@ -139,13 +145,14 @@ class ScheduledQuizManager:
                 pass
 
 
-schedule_mgr: "ScheduledQuizManager | None" = None
+# Always instantiate schedule_mgr so it's never None
+schedule_mgr = ScheduledQuizManager()
 
 
 def init_schedule_manager(scheduler: AsyncIOScheduler) -> ScheduledQuizManager:
     """Called once from bot.py after the shared scheduler is created."""
     global schedule_mgr
-    schedule_mgr = ScheduledQuizManager(scheduler)
+    schedule_mgr.set_scheduler(scheduler)
     return schedule_mgr
 
 
