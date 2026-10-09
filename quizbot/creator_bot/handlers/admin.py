@@ -159,13 +159,13 @@ async def start_cmd(c: Client, m: Message) -> None:
 @ratelimit("default")
 async def help_cmd(c: Client, m: Message) -> None:
     """/help -- full command reference."""
-    await m.reply(HELP_TEXT, disable_web_page_preview=True)
+    await m.reply(HELP_TEXT, web_page_preview=False)
 
 
 @ratelimit("default")
 async def features_cmd(c: Client, m: Message) -> None:
     """/features -- short marketing-style feature overview."""
-    await m.reply(FEATURES_TEXT, disable_web_page_preview=True)
+    await m.reply(FEATURES_TEXT, web_page_preview=False)
 
 
 async def limit_cmd(c: Client, m: Message) -> None:
@@ -279,17 +279,15 @@ LEADERS_PAGE_SIZE = config.LEADERS_PAGE_SIZE
 
 
 def _leaders_rich_md(quiz_name: str, rows: list[dict], start_rank: int) -> str:
-    """Build a GFM markdown table for sendRichMessage (up to ~32k chars per
-    message vs. the normal 4096 limit -- lets a full 200-row leaderboard
-    page go out as one nicely formatted message instead of many)."""
+    """Build a GFM markdown table for sendRichMessage."""
     lines = [
-        f"### \U0001F3C5 Leading Aspirants -- {quiz_name}",
+        f"### 🥇 Leading Aspirants -- {quiz_name}",
         "",
         "| # | Name | Score | Qs | Time |",
         "|--:|:-----|------:|---:|-----:|",
     ]
     for j, r in enumerate(rows, start=start_rank):
-        icon = "\U0001F947" if j == 1 else "\U0001F948" if j == 2 else "\U0001F949" if j == 3 else str(j)
+        icon = "🥇" if j == 1 else "🥈" if j == 2 else "🥉" if j == 3 else str(j)
         name = str(r.get("user_name") or "Player")[:22].replace("|", "\\|")
         secs = r.get("time_taken", 0) or 0
         mn, sc = divmod(int(secs), 60)
@@ -298,10 +296,6 @@ def _leaders_rich_md(quiz_name: str, rows: list[dict], start_rank: int) -> str:
 
 
 async def _send_raw_bot_api(method: str, params: dict) -> dict:
-    """Adapter for `quizbot.shared.rich_quiz`: Pyrogram has no HTTP Bot API
-    client (it speaks MTProto directly), so sendRichMessage -- a Bot-API-only
-    method (Bot API 10.1) -- is called over plain HTTPS instead, exactly as
-    the original bot did."""
     url = f"https://api.telegram.org/bot{config.CREATOR_BOT_TOKEN}/{method}"
     status, body = await request_json("POST", url, json_body=params, retries=1)
     if status != 200 or not isinstance(body, dict) or not body.get("ok"):
@@ -311,10 +305,7 @@ async def _send_raw_bot_api(method: str, params: dict) -> dict:
 
 @ratelimit("default")
 async def leaders_cmd(c: Client, m: Message) -> None:
-    """/leaders <quiz_id> (or /aspirants) -- full ranked leaderboard for a
-    quiz. Each page is sent as a single sendRichMessage GFM table when
-    possible (up to ~32k chars), falling back automatically to chunked
-    plain-text messages if the receiving client/Bot API doesn't support it."""
+    """/leaders <quiz_id> (or /aspirants) -- full ranked leaderboard for a quiz."""
     parts = m.text.split(maxsplit=1)
     if len(parts) < 2:
         await m.reply("Usage: `/leaders QUIZID`")
