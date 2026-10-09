@@ -84,14 +84,6 @@ HELP_TEXT = (
 async def start_cmd(c: Client, m: Message) -> None:
     """/start -- silent unless it's a Razorpay payment deep-link
     (`?start=pay_<token>`).
-
-    Both bots share one Telegram token in this deployment, and the Runner
-    Bot owns the user-facing /start welcome message -- so this handler must
-    stay registered (Telegram always delivers a deep-link payload as
-    `/start`, there's no way to route it to another command name) but does
-    nothing visible for a bare /start with no payload, to avoid a second,
-    conflicting welcome message. See `runner_bot/handlers/admin.py` for the
-    shared /start and /help text.
     """
     uid = m.from_user.id
     await UserRepository(get_db()).get_or_create(uid)
@@ -121,10 +113,6 @@ async def start_cmd(c: Client, m: Message) -> None:
         try:
             fmt = await grant_and_notify(uid, days)
         except Exception:
-            # Grant failed (e.g. a transient DB error) -- re-queue the
-            # pending payment so a retry of the /start deep-link can pick
-            # it back up, and tell the user honestly instead of claiming
-            # success. Matches the original bot's failure-path behavior.
             logger.error("grant_and_notify failed for uid=%s token=%s", uid, token, exc_info=True)
             state.pending_payments[token] = entry
             await m.reply(
@@ -151,21 +139,19 @@ async def start_cmd(c: Client, m: Message) -> None:
         )
         return
 
-    # Bare /start, no payment payload -- intentionally silent. The Runner
-    # Bot's /start owns the welcome message for this deployment.
     return
 
 
 @ratelimit("default")
 async def help_cmd(c: Client, m: Message) -> None:
     """/help -- full command reference."""
-    await m.reply(HELP_TEXT, web_page_preview=False)
+    await m.reply(HELP_TEXT)
 
 
 @ratelimit("default")
 async def features_cmd(c: Client, m: Message) -> None:
     """/features -- short marketing-style feature overview."""
-    await m.reply(FEATURES_TEXT, web_page_preview=False)
+    await m.reply(FEATURES_TEXT)
 
 
 async def limit_cmd(c: Client, m: Message) -> None:
@@ -254,8 +240,7 @@ async def statses_cmd(c: Client, m: Message) -> None:
 
 
 async def testapi_cmd(c: Client, m: Message) -> None:
-    """/testapi -- (owner only) sanity-check DB connectivity. Replaces the
-    legacy PHP-API connectivity test now that everything is MongoDB."""
+    """/testapi -- (owner only) sanity-check DB connectivity."""
     if m.from_user.id != config.OWNER_ID:
         return
     status = await m.reply("🔄 Testing database connectivity...")
@@ -279,7 +264,6 @@ LEADERS_PAGE_SIZE = config.LEADERS_PAGE_SIZE
 
 
 def _leaders_rich_md(quiz_name: str, rows: list[dict], start_rank: int) -> str:
-    """Build a GFM markdown table for sendRichMessage."""
     lines = [
         f"### 🥇 Leading Aspirants -- {quiz_name}",
         "",
