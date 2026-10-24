@@ -5,7 +5,6 @@ This project was originally developed by Gagan (github.com/devgaganin).
 Reference: https://t.me/advance_quiz_bot
 The codebase has been reviewed and verified with the assistance of Claude AI.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -13,6 +12,9 @@ import asyncio
 import logging
 import signal
 import sys
+
+# --- FIX 1: Import moved below __future__ ---
+from keep_alive import keep_alive
 
 from quizbot.database import init_db, close_db
 from quizbot.shared import config
@@ -28,27 +30,20 @@ logger = logging.getLogger("launcher")
 for noisy in ("httpx", "httpcore", "apscheduler", "pymongo"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
-
 async def _run_creator_bot() -> None:
     from quizbot.creator_bot.bot import run_creator_bot
-
     logger.info("Starting Creator Bot (Pyrogram)...")
     await run_creator_bot()
 
-
 async def _run_runner_bot() -> None:
     from quizbot.runner_bot.bot import run_runner_bot
-
     logger.info("Starting Runner Bot (python-telegram-bot)...")
     await run_runner_bot()
 
-
 async def _run_mini_app() -> None:
     from quizbot.mini_app.server import run_mini_app_server
-
     logger.info("Starting Mini App server (FastAPI)...")
     await run_mini_app_server()
-
 
 async def main(only: str | None) -> None:
     problems = config.validate(bot=only or "both")
@@ -105,6 +100,9 @@ async def main(only: str | None) -> None:
 
 
 if __name__ == "__main__":
+    # --- FIX 2: Start the web server before starting the bot logic ---
+    keep_alive()
+    
     parser = argparse.ArgumentParser(description="Run the Advance Quiz Bot platform.")
     parser.add_argument(
         "--only", choices=["creator", "runner", "miniapp"], default=None,
