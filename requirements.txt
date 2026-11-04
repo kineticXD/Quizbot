@@ -36,4 +36,4 @@ Flask
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 cryptography==43.0.3
-pydantic==2.9.2
+pydantic>=2.10.6
