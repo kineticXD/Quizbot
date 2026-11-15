@@ -79,6 +79,9 @@ class RateLimiter:
         )
 
     async def check(self, user_id: int) -> bool:
+        # The owner and configured admins are exempt from runner throttling too.
+        if user_id == config.OWNER_ID or user_id in config.ADMIN_IDS:
+            return True
         now = time.time()
         bucket = self.buckets[user_id]
         while bucket and bucket[0] < now - config.RATE_LIMIT_WINDOW:
