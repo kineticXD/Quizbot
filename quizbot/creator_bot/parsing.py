@@ -99,7 +99,126 @@ def _pad_table_blocks(text: str) -> str:
     return out
 
 
-_ABCD_RE = re.compile(r"^[A-Da-d]\)")
+_ABCD_RE = re.compile(r"^[A-Da-d]\s*[).:]")
+
+_OPTION_LINE_RE = re.compile(r"^\s*[A-Da-d]\s*[).:]\s*\S")
+_QUESTION_LABEL_RE = re.compile(r"^\s*(?:(?:question|q)\s*)?\d+\s*[.):]\s*\S", re.IGNORECASE)
+_QUESTION_STARTS = (
+    "what ", "which ", "who ", "when ", "where ", "why ", "how ",
+    "according to ", "based on ", "from the passage", "the passage suggests",
+    "it can be inferred", "which of ", "what can be inferred",
+    "select ", "choose ", "identify ", "the author", "the main idea",
+)
+
+def _is_question_prompt_line(line: str) -> bool:
+    value = line.strip()
+    lower = value.lower()
+    return bool(_QUESTION_LABEL_RE.match(value)) or lower.startswith(_QUESTION_STARTS) or value.endswith("?")
+
+def _extract_shared_passage(block: str) -> str:
+    lines = block.split("\n")
+    first_option = next((i for i, line in enumerate(lines)
+                         if _OPTION_LINE_RE.match(line)), len(lines))
+    candidates = [i for i, line in enumerate(lines[:first_option])
+                  if line.strip() and _is_question_prompt_line(line)]
+    if not candidates:
+        return ""
+    question_start = candidates[-1]
+    prefix = "\n".join(lines[:question_start]).strip()
+    return prefix if len(prefix) >= 40 else ""
+
+
+def _inherit_shared_passage(blocks: list[str]) -> list[str]:
+    """Repeat each leading passage for later questions that refer to it.
+
+    CLAT-style sets often provide one passage followed by multiple A-D
+    question blocks. Preserve that context on every parsed question, while
+    allowing a later block with its own passage to start a new passage group.
+    """
+    if len(blocks) < 2:
+        return blocks
+    updated: list[str] = []
+    active_passage = ""
+    for block in blocks:
+        own_passage = _extract_shared_passage(block)
+        first = next((line for line in block.split("\n") if line.strip()), "")
+        if own_passage:
+            active_passage = own_passage
+            updated.append(block)
+        elif active_passage and _is_question_prompt_line(first):
+            updated.append(f"{active_passage}\n\n{block}")
+        else:
+            updated.append(block)
+    return updated
+
+
+def split_question_blocks(text: str) -> list[str]:
+    """Split pasted/TXT content without breaking blank paragraphs in passages.
+
+    A boundary is recognised after a run of at least two A-D option lines.
+    Blank lines inside a passage remain part of the same question. Legacy
+    formats without labelled options retain blank-line-separated behaviour.
+    """
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+
+    lines = normalized.split("\n")
+    boundaries: list[int] = []
+    found_option_run = False
+    i = 0
+    while i < len(lines):
+        if not _OPTION_LINE_RE.match(lines[i]):
+            i += 1
+            continue
+
+        option_count = 0
+        last_option = i
+        j = i
+        while j < len(lines):
+            if _OPTION_LINE_RE.match(lines[j]):
+                option_count += 1
+                last_option = j
+                j += 1
+                continue
+            if not lines[j].strip():
+                j += 1
+                continue
+            if lines[j].strip().lower().startswith(("ex:", "explanation:", "rt:", "id:")):
+                j += 1
+                continue
+            break
+
+        if option_count >= 2:
+            found_option_run = True
+            # Keep blank lines and explanation/metadata with the prior question.
+            k = last_option + 1
+            while k < len(lines) and (
+                not lines[k].strip()
+                or lines[k].strip().lower().startswith(("ex:", "explanation:", "rt:", "id:"))
+            ):
+                k += 1
+            if k < len(lines):
+                boundaries.append(k)
+                i = k
+                continue
+        i += 1
+
+    if not boundaries:
+        if found_option_run:
+            return [normalized]
+        emoji_separators = sum(1 for line in lines if _line_is_emoji_separator(line))
+        if emoji_separators == 1:
+            return [normalized]
+        legacy_blocks = [part.strip() for part in re.split(r"\n[ \t]*\n+", normalized) if part.strip()]
+        return _inherit_shared_passage(legacy_blocks)
+
+    starts = [0, *boundaries]
+    ends = [*boundaries, len(lines)]
+    parsed_blocks = ["\n".join(lines[a:b]).strip() for a, b in zip(starts, ends)
+                     if "\n".join(lines[a:b]).strip()]
+    return _inherit_shared_passage(parsed_blocks)
+
 
 
 def parse_question_block(blk: str) -> Optional[dict]:
@@ -182,7 +301,7 @@ def parse_question_block(blk: str) -> Optional[dict]:
         if not ln.strip():
             continue
         ln = ln.strip()
-        ln = re.sub(r"^[A-Da-d]\)\s*", "", ln)
+        ln = re.sub(r"^[A-Da-d]\s*[).:]\s*", "", ln)
         if "✅" in ln:
             coids.append(len(opts))
             ln = ln.replace("✅", "").strip()
