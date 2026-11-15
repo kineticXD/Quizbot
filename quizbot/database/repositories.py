@@ -534,6 +534,35 @@ class AttemptRepository:
             pass  # unique(qid, user_id) -- first attempt only, ignore duplicates
         return await self.get(attempt_id)
 
+    async def record_attempt(
+        self, *, user_id: int, quiz_id: str, score: float, correct: int,
+        wrong: int, total_questions: int, total_time: float,
+    ) -> dict:
+        """Persist a completed group/private attempt for reports and analytics."""
+        now = datetime.now(timezone.utc)
+        started = now - timedelta(seconds=max(0.0, float(total_time or 0)))
+        doc = {
+            "attempt_id": uuid.uuid4().hex,
+            "user_id": int(user_id),
+            "qid": str(quiz_id),
+            "quiz_name": "",
+            "current_question": int(total_questions),
+            "answers": {},
+            "score": float(score),
+            "correct": int(correct),
+            "wrong": int(wrong),
+            "total_questions": int(total_questions),
+            "total_time": max(0.0, float(total_time or 0)),
+            "time_started": started.strftime("%Y-%m-%d %H:%M:%S"),
+            "time_ended": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "completed",
+            "paused": False,
+            "pause_time": None,
+            "total_pause_duration": 0,
+        }
+        await self.col.insert_one(doc)
+        return _clean(doc)
+
     async def list_completed(self, qid: str) -> list[dict]:
         """All completed attempts for a quiz, newest first (by time_ended).
         Used for the /compare_results analysis report."""
@@ -547,6 +576,48 @@ class LeaderboardRepository:
     def __init__(self, db: Database):
         self.db = db
         self.col = db.collection("leaderboard")
+
+    async def upsert_entry(
+        self, *, quiz_id: str, user_id: int, user_name: str, score: float,
+        correct: int, wrong: int, total_questions: int, time_taken: float,
+    ) -> dict:
+        """Keep each user's best result per quiz (higher score, then faster time)."""
+        qid = str(quiz_id)
+        uid = int(user_id)
+        duration = max(0.0, float(time_taken or 0))
+        now = _now_iso()
+        key = {"qid": qid, "user_id": uid}
+        entry = {
+            **key,
+            "username": str(user_name or "Aspirant"),
+            "user_name": str(user_name or "Aspirant"),
+            "score": float(score),
+            "correct": int(correct),
+            "wrong": int(wrong),
+            "total_questions": int(total_questions),
+            "time_taken": duration,
+            "completed_at": now,
+        }
+
+        existing = await self.col.find_one(key)
+        if existing is None:
+            try:
+                await self.col.insert_one(entry)
+            except Exception:
+                # Another group may have inserted the same user/quiz at the
+                # same time. Re-read and apply the normal best-score rule.
+                existing = await self.col.find_one(key)
+                if existing is None:
+                    raise
+        if existing is not None:
+            old_score = float(existing.get("score", 0) or 0)
+            old_time = float(existing.get("time_taken", float("inf")) or 0)
+            is_better = float(score) > old_score or (
+                float(score) == old_score and duration < old_time
+            )
+            if is_better:
+                await self.col.update_one(key, {"$set": entry})
+        return _clean(await self.col.find_one(key)) or entry
 
     async def top(self, qid: str, limit: int = 10) -> list[dict]:
         cursor = (
