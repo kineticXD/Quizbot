@@ -54,6 +54,7 @@ from ..telegram_utils import (
     _get_topic_thread_id,
     prepare_poll_data,
     safe_send_message,
+    safe_send_long_message,
     safe_send_poll,
     send_raw_api,
 )
@@ -255,9 +256,7 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
             options, correct_ids = shuffle_options_multi(options, correct_ids, shuffle_o_count)
 
         if target_lang and target_lang != "en":
-            await safe_send_message(
-                ctx, chat_id, f"📝 <b>Original</b>\n\n{original_q['question']}", parse_mode=ParseMode.HTML
-            )
+            await safe_send_long_message(ctx, chat_id, f"📝 Original\n\n{original_q['question']}")
             await asyncio.sleep(0.5)
 
         photo_msg_id = None
@@ -290,7 +289,7 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
             overflow = None
 
         if overflow:
-            await safe_send_message(ctx, chat_id, overflow, parse_mode=ParseMode.HTML)
+            await safe_send_long_message(ctx, chat_id, overflow)
             await asyncio.sleep(0.5)
 
         timer = s.get("timer_override") or s.get("current_section_timer", s["quiz_data"]["timer"])
@@ -452,7 +451,7 @@ async def end_private_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None
         qname = quiz_data.get("quiz_name", "Unnamed Quiz")
         txt = (
             f"🏆 <b>Quiz Completed!</b>\n\n"
-            f"📝 Quiz: {qname}\n📊 Total: {total}\n\n"
+            f"📝 Quiz: {escape(str(qname))}\n📊 Total: {total}\n\n"
             f"📈 <b>Your Performance:</b>\n"
             f"✅ Correct: {correct}\n❌ Wrong: {wrong}\n"
             f"🎯 Score: {score:.2f}\n⏱️ Time: {int(minutes)}m {int(seconds)}s\n"
@@ -480,6 +479,8 @@ async def run_group_quiz(
     protect_type: bool, update: Any, skip: int = 0,
 ) -> None:
     """Main group quiz loop -- one long-lived coroutine per running quiz."""
+    from ..state import pollquiz_sessions
+    pollquiz_sessions.pop(chat_id, None)
     try:
         sections = quiz.get("sections", [])
         if sections:
@@ -527,10 +528,7 @@ async def _run_flat_quiz(
             options, correct_ids = shuffle_options_multi(options, correct_ids, shuffle_o_count)
 
         if target_lang and target_lang != "en":
-            await safe_send_message(
-                ctx, chat_id, f"📝 <b>Original</b>\n\n{original_q['question']}",
-                parse_mode=ParseMode.HTML, thread_id=thread_id,
-            )
+            await safe_send_long_message(ctx, chat_id, f"📝 Original\n\n{original_q['question']}", thread_id=thread_id)
             await asyncio.sleep(0.5)
 
         photo_msg_id = None
@@ -562,7 +560,7 @@ async def _run_flat_quiz(
             overflow = None
 
         if overflow:
-            await safe_send_message(ctx, chat_id, overflow, parse_mode=ParseMode.HTML, thread_id=thread_id)
+            await safe_send_long_message(ctx, chat_id, overflow, thread_id=thread_id)
             await asyncio.sleep(0.5)
 
         if s.get("timer_override") is not None:
@@ -717,7 +715,7 @@ async def _run_sectioned_quiz(
                 overflow = None
 
             if overflow:
-                await safe_send_message(ctx, chat_id, overflow, parse_mode=ParseMode.HTML, thread_id=thread_id)
+                await safe_send_long_message(ctx, chat_id, overflow, thread_id=thread_id)
                 await asyncio.sleep(0.5)
 
             if s.get("timer_override") is not None:
@@ -776,8 +774,8 @@ async def _send_explanation_after_poll(
     expl = question.get("explanation")
     if not expl or not str(expl).strip():
         return
-    txt = f"💡 <b>Explanation:</b>\n\n{expl}"
-    await safe_send_message(ctx, chat_id, txt, parse_mode=ParseMode.HTML, thread_id=thread_id)
+    txt = f"💡 Explanation:\n\n{expl}"
+    await safe_send_long_message(ctx, chat_id, txt, thread_id=thread_id)
 
 
 async def _send_mid_quiz_leaderboard(
@@ -811,7 +809,7 @@ async def _send_mid_quiz_leaderboard(
 
     lines = [f"📊 <b>Mid-Quiz Leaderboard</b> ({current_q}/{total_q})\n"]
     for i, (name, c, w, sc) in enumerate(top, 1):
-        lines.append(f"{i}. <b>{name}</b> — {sc:.1f} pts ({c}✅ {w}❌)")
+        lines.append(f"{i}. <b>{escape(str(name))}</b> — {sc:.1f} pts ({c}✅ {w}❌)")
 
     await safe_send_message(ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id)
 
@@ -837,6 +835,9 @@ async def handle_group_poll_answer(poll_id: str, user_id: int, option_ids: list,
 async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: Any) -> None:
     thread_id = _get_topic_thread_id(update)
     try:
+        # Allow Telegram poll_answer updates from the final poll to finish
+        # dispatching before the live session is removed.
+        await asyncio.sleep(2.0)
         s = await session_mgr.delete(chat_id)
         if not s:
             return
@@ -881,21 +882,30 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
             pass
 
         qname = quiz_data.get("quiz_name", "Unnamed Quiz")
-        lines = [f"🏆 <b>Final Leaderboard — {qname}</b>\n📊 Total Questions: {total}\n"]
+        lines = [f"🏆 <b>Final Leaderboard — {escape(str(qname))}</b>\n📊 Total Questions: {total}\n"]
         for rank, u in enumerate(user_summary[:10], 1):
             med = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"{rank}."
             m, sec = divmod(int(u["total_time"]), 60)
-            lines.append(f"{med} <b>{u['name']}</b>: {u['score']:.2f} pts ({u['correct']}✅ {u['wrong']}❌) in {m}m {sec}s")
+            lines.append(f"{med} <b>{escape(str(u['name']))}</b>: {u['score']:.2f} pts ({u['correct']}✅ {u['wrong']}❌) in {m}m {sec}s")
+
+        if not user_summary:
+            lines.append("No player answers were received by the bot, so no individual scores could be calculated. Check that the quiz poll is non-anonymous and that the runner update handler is receiving poll_answer updates.")
 
         if len(user_summary) > 10:
             lines.append(f"\n...and {len(user_summary) - 10} more participants!")
+        quiz_ref = quiz_data.get("question_set_id") or quiz_data.get("qid")
+        if quiz_ref:
+            lines.append(f"\nUse /leaderboard {escape(str(quiz_ref))} to reopen these saved scores.")
 
         await safe_send_message(ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id)
 
-        await _record_attempt_and_report(
-            ctx, chat_id, quiz_data, user_summary, chat_title=chat_title,
-            protect_type=False, thread_id=thread_id,
-        )
+        if user_summary:
+            quiz_data_for_report = dict(quiz_data)
+            quiz_data_for_report["polls"] = s.get("polls", {})
+            await _record_attempt_and_report(
+                ctx, chat_id, quiz_data_for_report, user_summary, chat_title=chat_title,
+                protect_type=False, thread_id=thread_id,
+            )
     except Exception as e:
         logger.error("_end_group_quiz error: %s", e, exc_info=True)
         await safe_send_message(ctx, chat_id, "❌ Error ending quiz.", thread_id=thread_id)
@@ -904,7 +914,11 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
 async def _record_attempt_and_report(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz_data: dict, user_summary: list[dict],
     chat_title: str, protect_type: bool, thread_id: Optional[int]
-) -> None:
+) -> bool:
+    """Persist completed scores, best leaderboard entries, mistakes and stats."""
+    if not user_summary:
+        logger.warning("No participant scores to persist for chat=%s", chat_id)
+        return False
     try:
         db = get_db()
         attempt_repo = AttemptRepository(db)
@@ -913,33 +927,49 @@ async def _record_attempt_and_report(
         qstats_repo = QuestionStatsRepository(db)
 
         qid = quiz_data.get("question_set_id") or quiz_data.get("qid")
+        if not qid:
+            logger.error("Cannot persist leaderboard: quiz has no question_set_id/qid")
+            return False
+        qid = str(qid)
         questions = quiz_data.get("questions", [])
+        polls = quiz_data.get("polls", {})
+        question_totals: dict[int, dict[str, int]] = {}
 
-        for u in user_summary:
-            uid = u["user_id"]
+        for user in user_summary:
+            uid = int(user.get("user_id") or 0)
             if uid <= 0:
                 continue
 
             await attempt_repo.record_attempt(
-                user_id=uid, quiz_id=qid, score=u["score"], correct=u["correct"],
-                wrong=u["wrong"], total_questions=len(questions), total_time=u["total_time"],
+                user_id=uid, quiz_id=qid, score=user["score"], correct=user["correct"],
+                wrong=user["wrong"], total_questions=len(questions), total_time=user["total_time"],
             )
-
             await lb_repo.upsert_entry(
-                quiz_id=qid, user_id=uid, user_name=u["name"], score=u["score"],
-                correct=u["correct"], wrong=u["wrong"], total_questions=len(questions),
-                time_taken=u["total_time"],
+                quiz_id=qid, user_id=uid, user_name=user["name"], score=user["score"],
+                correct=user["correct"], wrong=user["wrong"], total_questions=len(questions),
+                time_taken=user["total_time"],
             )
 
-            for pid, ans in u["answers"].items():
-                pinfo = quiz_data.get("polls", {}).get(pid, {})
-                q_idx = pinfo.get("question_index")
-                if q_idx is not None and q_idx < len(questions):
-                    q = questions[q_idx]
-                    corr = is_correct(ans["option"], pinfo.get("correct_option", []))
-                    if not corr:
-                        await mistake_repo.add_mistake(uid, qid, q_idx, q)
-                    await qstats_repo.record_answer(qid, q_idx, corr)
+            mistakes = []
+            for poll_id, answer in user.get("answers", {}).items():
+                poll_info = polls.get(poll_id, {})
+                q_idx = poll_info.get("question_index")
+                if q_idx is None or not 0 <= int(q_idx) < len(questions):
+                    continue
+                q_idx = int(q_idx)
+                is_answer_correct = is_correct(
+                    answer.get("option", []), poll_info.get("correct_option", [])
+                )
+                stats = question_totals.setdefault(q_idx, {"index": q_idx, "wrong": 0, "total": 0})
+                stats["total"] += 1
+                if not is_answer_correct:
+                    stats["wrong"] += 1
+                    mistakes.append({"qid": qid, "index": q_idx})
+            if mistakes:
+                await mistake_repo.record(uid, mistakes)
+
+        if question_totals:
+            await qstats_repo.bulk_update_wrong_stats(qid, list(question_totals.values()))
 
         web_app_url = f"{config.MINI_APP_DOMAIN}/report?quiz_id={qid}" if config.MINI_APP_DOMAIN else None
         kb_buttons = []
@@ -953,8 +983,15 @@ async def _record_attempt_and_report(
             ctx, chat_id, "🎉 <b>Results saved to leaderboards!</b>",
             parse_mode=ParseMode.HTML, reply_markup=reply_markup, thread_id=thread_id
         )
+        return True
     except Exception as e:
         logger.error("_record_attempt_and_report error: %s", e, exc_info=True)
+        await safe_send_message(
+            ctx, chat_id,
+            "⚠️ The final score was calculated, but saving leaderboard records failed. Please check the bot logs.",
+            thread_id=thread_id,
+        )
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1208,44 +1245,96 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     chat = update.effective_chat
     if not chat:
         return
+
+    # Prefer the currently active timed quiz over a previously completed
+    # non-expiring /pollquiz snapshot in the same chat.
     session = session_mgr.get(chat.id)
-    if not session or session.get("is_private"):
-        await safe_send_message(ctx, chat.id, "⚠️ No group quiz leaderboard is available right now.")
+    if session and not session.get("is_private") and not ctx.args:
+        quiz = session.get("quiz_data", {})
+        participants = session.get("participants", {})
+        polls = session.get("polls", {})
+        correct_mark = float(quiz.get("correct_mark", quiz.get("correct_marks", 1)) or 1)
+        negative_marking = float(quiz.get("negative_marking", quiz.get("negative_marks", 0)) or 0)
+        rows: list[tuple[str, float, int, int, float]] = []
+        for participant in participants.values():
+            correct = wrong = 0
+            total_time = 0.0
+            answers = participant.get("answers", {})
+            for poll_id, poll_data in polls.items():
+                answer = answers.get(poll_id)
+                if not answer:
+                    continue
+                elapsed = max(0.0, float(answer.get("time", 0)) - float(poll_data.get("sent_time", 0)))
+                total_time += elapsed
+                if is_correct(answer.get("option", []), poll_data.get("correct_option", [])):
+                    correct += 1
+                else:
+                    wrong += 1
+            score = correct * correct_mark - wrong * negative_marking
+            rows.append((participant.get("name", "Aspirant"), score, correct, wrong, total_time))
+        rows.sort(key=lambda item: (item[1], -item[4]), reverse=True)
+        title = f"🏆 <b>Live Leaderboard</b> — {escape(str(quiz.get('quiz_name', 'Quiz')))}"
+        if not rows:
+            await safe_send_message(ctx, chat.id, "📊 No answers have been recorded yet.")
+            return
+        lines = [title]
+        for rank, (name, score, correct, wrong, total_time) in enumerate(rows[:20], 1):
+            minutes, seconds = divmod(int(total_time), 60)
+            lines.append(
+                f"{rank}. <b>{escape(str(name))}</b> — {score:.2f} pts | "
+                f"✅ {correct}  ❌ {wrong} | ⏱️ {minutes}m {seconds}s"
+            )
+        await safe_send_message(ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML)
         return
 
-    quiz = session.get("quiz_data", {})
-    participants = session.get("participants", {})
-    polls = session.get("polls", {})
-    correct_mark = float(quiz.get("correct_mark", quiz.get("correct_marks", 1)) or 1)
-    negative_marking = float(quiz.get("negative_marking", quiz.get("negative_marks", 0)) or 0)
-    rows: list[tuple[str, float, int, int, float]] = []
-    for participant in participants.values():
-        correct = wrong = 0
-        total_time = 0.0
-        answers = participant.get("answers", {})
-        for poll_id, poll_data in polls.items():
-            answer = answers.get(poll_id)
-            if not answer:
-                continue
-            elapsed = max(0.0, float(answer.get("time", 0)) - float(poll_data.get("sent_time", 0)))
-            total_time += elapsed
-            if is_correct(answer.get("option", []), poll_data.get("correct_option", [])):
-                correct += 1
-            else:
-                wrong += 1
-        score = correct * correct_mark - wrong * negative_marking
-        rows.append((participant.get("name", "Aspirant"), score, correct, wrong, total_time))
-
-    rows.sort(key=lambda item: (item[1], -item[4]), reverse=True)
-    if not rows:
-        await safe_send_message(ctx, chat.id, "📊 No answers have been recorded yet.")
+    from ..state import pollquiz_sessions
+    pollquiz_session = pollquiz_sessions.get(chat.id)
+    if pollquiz_session and not ctx.args:
+        from .poll_quiz import pollquiz_score_rows
+        poll_rows = pollquiz_score_rows(pollquiz_session)
+        title = f"🏆 <b>Poll Quiz Leaderboard</b> — {escape(str(pollquiz_session.get('quiz_name', 'Quiz')))}"
+        lines = [title, f"📊 Scores from {len(pollquiz_session.get('polls', {}))}/{pollquiz_session.get('total_questions', 0)} posted questions.\n"]
+        for rank, row in enumerate(poll_rows[:20], 1):
+            lines.append(
+                f"{rank}. <b>{escape(str(row['name']))}</b> — {row['score']:.2f} pts | "
+                f"✅ {row['correct']}  ❌ {row['wrong']} | "
+                f"📝 {row['answered']}/{pollquiz_session.get('total_questions', 0)} answered"
+            )
+        if not poll_rows:
+            lines.append("No answers have been recorded yet. Participants must answer the individual polls in this group.")
+        if not pollquiz_session.get("finalized"):
+            lines.append("\nThis is a live snapshot. When everyone finishes, run /pollstop to close polls and save the final results.")
+        await safe_send_message(
+            ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML,
+            thread_id=pollquiz_session.get("message_thread_id"),
+        )
         return
 
-    lines = [f"🏆 <b>Live Leaderboard</b> — {escape(quiz.get('quiz_name', 'Quiz'))}"]
-    for rank, (name, score, correct, wrong, total_time) in enumerate(rows[:20], 1):
+    qid = ctx.args[0].strip() if ctx.args else None
+    if not qid:
+        await safe_send_message(ctx, chat.id, "Usage: /leaderboard QUIZ_ID after a quiz has finished, or /leaderboard during an active quiz.")
+        return
+    try:
+        rows_db = await LeaderboardRepository(get_db()).top(qid, limit=20)
+        quiz_doc = await QuizRepository(get_db()).get(qid)
+    except Exception as exc:
+        logger.error("leaderboard query failed for %s: %s", qid, exc, exc_info=True)
+        await safe_send_message(ctx, chat.id, "⚠️ Could not load the saved leaderboard right now.")
+        return
+    if not rows_db:
+        await safe_send_message(ctx, chat.id, f"📊 No saved scores found for quiz {escape(qid)} yet.")
+        return
+    title = f"🏆 <b>Leaderboard</b> — {escape(str((quiz_doc or {}).get('quiz_name') or qid))}"
+    lines = [title]
+    for rank, entry in enumerate(rows_db, 1):
+        name = entry.get("user_name") or entry.get("username") or "Aspirant"
+        score = float(entry.get("score", 0) or 0)
+        correct = int(entry.get("correct", 0) or 0)
+        wrong = int(entry.get("wrong", 0) or 0)
+        total_time = float(entry.get("time_taken", 0) or 0)
         minutes, seconds = divmod(int(total_time), 60)
         lines.append(
-            f"{rank}. <b>{escape(name)}</b> — {score:.2f} pts | "
+            f"{rank}. <b>{escape(str(name))}</b> — {score:.2f} pts | "
             f"✅ {correct}  ❌ {wrong} | ⏱️ {minutes}m {seconds}s"
         )
     await safe_send_message(ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML)
@@ -1264,6 +1353,10 @@ async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
     await handle_private_poll_answer(poll_id, user_id, option_ids, current_time)
     await handle_group_poll_answer(poll_id, user_id, option_ids, current_time, user_name)
+    # The non-expiring /pollquiz flow has its own per-chat poll registry.
+    # Import lazily to avoid a handler-module import cycle.
+    from .poll_quiz import handle_pollquiz_poll_answer
+    await handle_pollquiz_poll_answer(poll_id, user_id, option_ids, current_time, user_name)
 
 
 def register(application: Application) -> None:
