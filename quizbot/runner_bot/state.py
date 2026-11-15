@@ -79,7 +79,7 @@ class RateLimiter:
         )
 
     async def check(self, user_id: int) -> bool:
-        # The owner and configured admins are exempt from runner throttling too.
+        # Preserve owner/admin immunity from the earlier rate-limit patch.
         if user_id == config.OWNER_ID or user_id in config.ADMIN_IDS:
             return True
         now = time.time()
@@ -143,8 +143,12 @@ class TaskTracker:
 
 tasks = TaskTracker()
 
-# chat_id -> asyncio.Task for an ongoing channel /pollquiz run.
+# chat_id -> asyncio.Task for an ongoing /pollquiz run.
 channel_poll_tasks: dict[int, asyncio.Task] = {}
+
+# In-memory score tracking for non-anonymous group /pollquiz sessions.
+# Channel polls are anonymous by Telegram design and cannot produce individual ranks.
+pollquiz_sessions: dict[int, dict[str, Any]] = {}
 
 # Pending quiz-setup wizard state (before a quiz begins), keyed by chat_id.
 # See handlers/setup_wizard.py for the qs_* callback flow that populates this.
