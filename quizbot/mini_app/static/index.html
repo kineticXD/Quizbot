@@ -1310,16 +1310,22 @@
       { label: "None", value: 0 },
       { label: "15s", value: 15 },
       { label: "30s", value: 30 },
+      { label: "45s", value: 45 },
       { label: "60s", value: 60 },
+      { label: "90s", value: 90 },
+      { label: "2m", value: 120 },
+      { label: "2m 30s", value: 150 },
+      { label: "3m", value: 180 },
+      { label: "4m", value: 240 },
       { label: "Custom", value: "custom" }
     ];
     var timerCustomRow = el("div", "custom-input-row");
     var timerCustomInput = document.createElement("input");
     timerCustomInput.type = "number";
-    timerCustomInput.min = "1";
+    timerCustomInput.min = "10";
     timerCustomInput.max = "3600";
-    timerCustomInput.placeholder = "seconds";
-    timerCustomInput.value = "45";
+    timerCustomInput.placeholder = "10–3600 seconds";
+    timerCustomInput.value = "90";
     timerCustomRow.appendChild(timerCustomInput);
     timerCustomRow.appendChild(el("span", "custom-input-suffix", "seconds per question"));
 
@@ -1333,7 +1339,7 @@
         btn.classList.add("active");
         if (choice.value === "custom") {
           timerCustomRow.classList.add("active");
-          state.opt.timer = Math.max(1, Math.min(3600, parseInt(timerCustomInput.value, 10) || 45));
+          state.opt.timer = Math.max(10, Math.min(3600, parseInt(timerCustomInput.value, 10) || 60));
         } else {
           timerCustomRow.classList.remove("active");
           state.opt.timer = choice.value;
@@ -1344,7 +1350,7 @@
     });
     timerBtns[0].classList.add("active"); // Default selected initially
     timerCustomInput.addEventListener("input", function () {
-      var v = Math.max(1, Math.min(3600, parseInt(timerCustomInput.value, 10) || 1));
+      var v = Math.max(10, Math.min(3600, parseInt(timerCustomInput.value, 10) || 10));
       state.opt.timer = v;
     });
     timerRow.appendChild(timerSeg);
