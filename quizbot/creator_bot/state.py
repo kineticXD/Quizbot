@@ -137,6 +137,8 @@ def check_rate_limit(user_id: int, bucket: str = "default") -> Optional[int]:
 def rate_limit_status_text(user_id: int) -> str:
     """Human-readable summary of the user's current rate-limit usage,
     used by /limit."""
+    if user_id == config.OWNER_ID or user_id in config.ADMIN_IDS:
+        return "🛡️ Owner/admin exemption active\n\nYou have unlimited access to creator command rate limits."
     labels = {
         "default": "General commands",
         "create": "/create + /done",
