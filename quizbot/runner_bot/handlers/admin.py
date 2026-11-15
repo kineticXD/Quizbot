@@ -28,6 +28,7 @@ HELP_TEXT = (
     "/start &lt;quiz_id&gt; [skip] — launch a quiz\n"
     "/pause, /resume, /stop — control the running quiz\n"
     "/slow, /fast, /normal — adjust the per-question timer\n"
+    "/timer <seconds> — set an exact timer for upcoming questions (10–3600)\n"
     "/leaderboard — show a live leaderboard mid-quiz\n\n"
     "<b>Other quiz modes</b>\n"
     "/pollquiz &lt;quiz_id&gt;, /pollstop — non-expiring poll mode\n"
@@ -129,5 +130,6 @@ async def watchdog_loop() -> None:
 
 
 def register(application: Application) -> None:
-    application.add_handler(CommandHandler("help", help_command))
+    # /help is owned by the creator-side adapter so a single-bot deployment
+    # never emits duplicate replies from both update clients.
     application.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.CHANNEL, handle_channel_command))
