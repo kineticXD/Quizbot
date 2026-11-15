@@ -2,7 +2,7 @@
 kurigram
 tgcrypto==1.2.5         
 python-telegram-bot==22.8 
-motor==3.7.1
+pymongo[srv]>=4.15,<5.0
 
 # ---- Async HTTP / files ----
 aiohttp==3.10.10
@@ -31,7 +31,7 @@ deep-translator==1.11.4
 # ---- Timezones ----
 pytz==2024.2
 
-Flask
+Flask>=3.0,<4.0
 # ---- Mini App----
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
