@@ -32,13 +32,13 @@ async def post_init(application: Application) -> None:
     init_schedule_manager(scheduler)
     scheduler.start()
     tasks.spawn(watchdog_loop(), name="watchdog")
-    logger.info("Runner Bot post_init complete (scheduler + watchdog started).")
+    logger.info("Quiz-player adapter post_init complete (scheduler + watchdog started).")
 
 
 async def post_shutdown(application: Application) -> None:
     """Runs once during Application.shutdown() -- tears down the scheduler."""
     scheduler.shutdown(wait=False)
-    logger.info("Runner Bot post_shutdown complete.")
+    logger.info("Quiz-player adapter post_shutdown complete.")
 
 
 def build_application() -> Application:
@@ -60,12 +60,11 @@ def build_application() -> Application:
 
 
 async def run_runner_bot() -> None:
-    """Run the Runner Bot non-blocking, as one of two concurrent asyncio
-    tasks sharing a single event loop with the Creator Bot.
+    """Run the quiz-player adapter non-blocking alongside the creator adapter.
 
     Uses the manual PTB lifecycle (initialize/start/start_polling) instead
     of `run_polling()`, which owns its own event loop and would block the
-    other bot from running alongside it in the same process.
+    Kurigram creator adapter from running alongside it in this process.
     """
     application = build_application()
 
@@ -73,16 +72,16 @@ async def run_runner_bot() -> None:
     await application.start()
     await application.updater.start_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
+        drop_pending_updates=False,
     )
-    logger.info("Runner Bot polling started.")
+    logger.info("Quiz-player adapter polling started.")
 
     try:
         # Block here until this task is cancelled by the launcher (run.py),
         # which happens on SIGINT/SIGTERM or if the sibling bot task dies.
         await asyncio.Future()
     finally:
-        logger.info("Runner Bot shutting down...")
+        logger.info("Quiz-player adapter shutting down...")
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
