@@ -607,7 +607,7 @@ def register(app: Client) -> None:
     app.on_message(filters.command("edit") & filters.private)(edit_cmd)
     app.on_message(filters.command("stopedit") & filters.private)(stopedit_cmd)
     app.on_callback_query(
-        filters.regex(r"^(?!stg_|dtc_|plan_|pay_|buy_|qd_|srch_|bat_|prev:|next:|refresh:)")
+        filters.regex(r"^(?!hmenu:|stg_|dtc_|plan_|pay_|buy_|qd_|srch_|bat_|prev:|next:|refresh:)")
     )(edit_tree_cb)
     runner_commands = [
         "start", "help", "pause", "resume", "stop", "slow", "fast", "normal",
