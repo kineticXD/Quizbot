@@ -1,0 +1,20 @@
+# Secrets and local-only files
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+
+# Python/build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime data, logs, and repository metadata
+data/
+*.log
+.git/
+.gitignore
