@@ -19,6 +19,8 @@ from pydantic import BaseModel
 # initData older than this is rejected outright, regardless of hash validity
 # -- limits the window in which a captured initData string could be replayed.
 MAX_INIT_DATA_AGE_SECONDS = 3600
+MAX_FUTURE_CLOCK_SKEW_SECONDS = 60
+MAX_INIT_DATA_LENGTH = 16_384
 
 
 class TelegramUser(BaseModel):
@@ -45,12 +47,23 @@ def verify_init_data(init_data: str, bot_token: str) -> Optional[VerifiedSession
     callers should treat None as "reject the request, no exceptions leak
     what went wrong" to avoid giving an attacker a verification oracle.
     """
-    if not init_data or not bot_token:
+    if not init_data or not bot_token or len(init_data) > MAX_INIT_DATA_LENGTH:
         return None
     try:
-        pairs = dict(parse_qsl(init_data, strict_parsing=True))
+        parsed_pairs = parse_qsl(
+            init_data,
+            strict_parsing=True,
+            keep_blank_values=True,
+            max_num_fields=100,
+        )
+        # Duplicate keys are ambiguous and can lead to different parsers
+        # authenticating different values. Reject them instead of silently
+        # letting dict() keep the last occurrence.
+        if len(parsed_pairs) != len({key for key, _value in parsed_pairs}):
+            return None
+        pairs = dict(parsed_pairs)
         received_hash = pairs.pop("hash", None)
-        if not received_hash:
+        if not received_hash or len(received_hash) != 64:
             return None
 
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
@@ -63,9 +76,14 @@ def verify_init_data(init_data: str, bot_token: str) -> Optional[VerifiedSession
             return None
 
         auth_date = int(pairs.get("auth_date", "0"))
+        now = time.time()
         if auth_date <= 0:
             return None
-        if time.time() - auth_date > MAX_INIT_DATA_AGE_SECONDS:
+        # Reject stale payloads and timestamps implausibly far in the future.
+        # A small skew allowance accommodates devices with slightly wrong clocks.
+        if now - auth_date > MAX_INIT_DATA_AGE_SECONDS:
+            return None
+        if auth_date - now > MAX_FUTURE_CLOCK_SKEW_SECONDS:
             return None
 
         user_raw = pairs.get("user")
