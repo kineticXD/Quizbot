@@ -19,6 +19,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from quizbot.shared import config
 from quizbot.shared.utils import is_premium_user
+from quizbot.shared.timers import TIMER_PRESET_ROWS, validate_quiz_timer, format_timer
 
 from ..ai_providers import AIQUIZ_LANG_UI, generate_in_chunks, get_provider_keys
 from ..state import AI_QUIZ_SESSIONS, last_working_ai, session_mgr, tasks
@@ -78,8 +79,8 @@ def _kb(step: str, uid: int) -> InlineKeyboardMarkup:
         ])
     if step == "timer":
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{t}s", callback_data=p("timer", t)) for t in (10, 15, 20)],
-            [InlineKeyboardButton(f"{t}s", callback_data=p("timer", t)) for t in (25, 30, 45)],
+            [InlineKeyboardButton(label, callback_data=p("timer", seconds)) for seconds, label in row]
+            for row in TIMER_PRESET_ROWS
         ])
     if step == "neg":
         return InlineKeyboardMarkup([
@@ -296,8 +297,8 @@ async def aiquiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             tasks.spawn(_aiquiz_generate_flow(uid, ctx, msg, sess), name=f"aiquiz_gen_{uid}")
 
         elif step == "timer":
-            sess["timer"] = int(value)
-            await _edit(msg, f"✅ Timer: {value}s\n\n➖ <b>Negative marking?</b>", _kb("neg", uid))
+            sess["timer"] = validate_quiz_timer(value)
+            await _edit(msg, f"✅ Timer: {format_timer(sess['timer'])}\n\n➖ <b>Negative marking?</b>", _kb("neg", uid))
 
         elif step == "neg":
             sess["neg"] = float(value)
