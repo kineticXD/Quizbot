@@ -11,6 +11,7 @@ import asyncio
 import base64
 import logging
 import os
+from html import escape
 import tempfile
 import time
 from typing import Any, Optional
@@ -28,6 +29,7 @@ from quizbot.database import (
     get_db,
 )
 from quizbot.shared import config
+from quizbot.shared.timers import clamp_quiz_timer, format_timer, validate_quiz_timer
 from quizbot.shared.html.quiz_report import render_quiz_html
 from quizbot.shared.mini_app_link import mini_app_web_app_button_ptb
 from quizbot.shared.rich_quiz import (
@@ -47,7 +49,7 @@ from ..quiz_utils import (
     section_marks,
     shuffle_options_multi,
 )
-from ..state import channel_poll_tasks, rate_limiter, session_mgr, tasks, translation_mgr
+from ..state import channel_poll_tasks, pending_quiz_settings, rate_limiter, session_mgr, tasks, translation_mgr
 from ..telegram_utils import (
     _get_topic_thread_id,
     prepare_poll_data,
@@ -204,7 +206,7 @@ async def _private_section_start(chat_id: int, section: dict, skip: int = 0) -> 
     ctx = s["context"]
     msg = await safe_send_message(
         ctx, chat_id,
-        f"📚 <b>{name}</b> started\n⏱️ Timer: {timer}s\n📋 Q{start_idx}–{end_idx}",
+        f"📚 <b>{name}</b> started\n⏱️ Timer: {format_timer(timer)}\n📋 Q{start_idx}–{end_idx}",
         parse_mode=ParseMode.HTML,
     )
     if msg:
@@ -291,10 +293,8 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
             await safe_send_message(ctx, chat_id, overflow, parse_mode=ParseMode.HTML)
             await asyncio.sleep(0.5)
 
-        timer = s.get("current_section_timer", s["quiz_data"]["timer"])
-        timer += s.get("modified_timer_offset", 0)
-        # Supports timers up to 240s (4m)
-        timer = max(10, min(int(timer), 240))
+        timer = s.get("timer_override") or s.get("current_section_timer", s["quiz_data"]["timer"])
+        timer = clamp_quiz_timer(int(timer) + s.get("modified_timer_offset", 0))
 
         poll_kwargs: dict[str, Any] = {}
         if is_multi:
@@ -317,6 +317,7 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
 
         if poll_msg:
             s["active_poll_id"] = poll_msg.poll.id
+            s["active_poll_message_id"] = poll_msg.message_id
             s["waiting_for_answer"] = True
             s["poll_start_time"] = time.time()
             s["current_index"] = idx
@@ -564,8 +565,11 @@ async def _run_flat_quiz(
             await safe_send_message(ctx, chat_id, overflow, parse_mode=ParseMode.HTML, thread_id=thread_id)
             await asyncio.sleep(0.5)
 
-        timer = _apply_char_boost(q, base_timer) + s.get("modified_timer_offset", 0)
-        timer = max(10, min(int(timer), 240))
+        if s.get("timer_override") is not None:
+            timer_base = int(s["timer_override"])
+        else:
+            timer_base = _apply_char_boost(q, base_timer)
+        timer = clamp_quiz_timer(timer_base + s.get("modified_timer_offset", 0))
 
         poll_kwargs: dict[str, Any] = {}
         if is_multi:
@@ -586,6 +590,7 @@ async def _run_flat_quiz(
 
         if poll_msg:
             s["active_poll_id"] = poll_msg.poll.id
+            s["active_poll_message_id"] = poll_msg.message_id
             s["current_index"] = idx
             s["polls"][poll_msg.poll.id] = {
                 "correct_option": correct_ids, "sent_time": time.time(), "question_index": idx,
@@ -715,8 +720,11 @@ async def _run_sectioned_quiz(
                 await safe_send_message(ctx, chat_id, overflow, parse_mode=ParseMode.HTML, thread_id=thread_id)
                 await asyncio.sleep(0.5)
 
-            timer = _apply_char_boost(q, sec_timer) + s.get("modified_timer_offset", 0)
-            timer = max(10, min(int(timer), 240))
+            if s.get("timer_override") is not None:
+                timer_base = int(s["timer_override"])
+            else:
+                timer_base = _apply_char_boost(q, sec_timer)
+            timer = clamp_quiz_timer(timer_base + s.get("modified_timer_offset", 0))
 
             poll_kwargs: dict[str, Any] = {}
             if is_multi:
@@ -737,6 +745,7 @@ async def _run_sectioned_quiz(
 
             if poll_msg:
                 s["active_poll_id"] = poll_msg.poll.id
+                s["active_poll_message_id"] = poll_msg.message_id
                 s["current_index"] = q_idx
                 s["polls"][poll_msg.poll.id] = {
                     "correct_option": correct_ids, "sent_time": time.time(), "question_index": q_idx,
@@ -952,6 +961,296 @@ async def _record_attempt_and_report(
 # POLL ANSWER ROUTER & HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════
 
+async def start_quiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Launch the quiz setup wizard from a Telegram deep link: /start QUIZ_ID [skip]."""
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+
+    args = list(ctx.args or [])
+    # Payment deep links are handled by the creator-side payment callback.
+    if args and args[0].startswith("pay_"):
+        return
+    if not args:
+        await safe_send_message(
+            ctx,
+            chat.id,
+            "<b>Welcome to Advance Quizbot!</b>\n\n"
+            "Create quizzes with /create, or open a shared quiz using /start QUIZ_ID.\n"
+            "Use /help to see all available commands.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    qid = args[0].strip()
+    try:
+        skip = int(args[1]) if len(args) > 1 else 0
+    except (TypeError, ValueError):
+        await safe_send_message(ctx, chat.id, "Usage: /start QUIZ_ID [skip_count]")
+        return
+    if skip < 0:
+        await safe_send_message(ctx, chat.id, "Skip count cannot be negative.")
+        return
+
+    if session_mgr.get(chat.id) or chat.id in pending_quiz_settings:
+        await safe_send_message(ctx, chat.id, "⚠️ A quiz or quiz setup is already active here. Finish it or use /stop first.")
+        return
+    if not await rate_limiter.check(user.id):
+        await safe_send_message(ctx, chat.id, "⏱️ Too many requests. Please wait a moment.")
+        return
+
+    quiz = await QuizRepository(get_db()).get(qid)
+    if not quiz or not quiz.get("questions"):
+        await safe_send_message(ctx, chat.id, "❌ Quiz not found or it contains no questions.")
+        return
+    if skip >= len(quiz["questions"]):
+        await safe_send_message(ctx, chat.id, f"❌ Skip count must be between 0 and {len(quiz['questions']) - 1}.")
+        return
+
+    chat_type = getattr(chat.type, "value", str(chat.type)).lower()
+    if chat_type.startswith("chattype."):
+        chat_type = chat_type.split(".", 1)[1]
+    if chat_type in ("group", "supergroup") and not await is_premium_user(user.id):
+        await safe_send_message(ctx, chat.id, "🔒 Group quiz hosting requires premium access.")
+        return
+
+    allowed, batch = await resolve_quiz_access(
+        qid, quiz, chat.id, chat_type, user.id, ctx=ctx
+    )
+    if not allowed:
+        if batch:
+            details = ["🔒 <b>Quiz access required</b>", f"Batch: <b>{escape(batch.get('name', ''))}</b>"]
+            if batch.get("payment_link"):
+                details.append(f"Payment: {escape(batch['payment_link'])}")
+            if batch.get("contact_info"):
+                details.append(f"Contact: {escape(batch['contact_info'])}")
+            await safe_send_message(ctx, chat.id, "\n".join(details), parse_mode=ParseMode.HTML)
+        else:
+            await safe_send_message(
+                ctx, chat.id,
+                f"🔒 This is a paid quiz. Contact the creator (ID: {quiz.get('creator_id', 'unknown')}) for access.",
+            )
+        return
+
+    quiz["question_set_id"] = quiz.get("qid", qid)
+    quiz["negative_marking"] = quiz.get("negative_marks", quiz.get("negative_marking", 0))
+    quiz["correct_mark"] = quiz.get("correct_marks", quiz.get("correct_mark", 1))
+    pending_quiz_settings[chat.id] = {
+        "quiz": quiz,
+        "update": update,
+        "skip": skip,
+        "protect": chat_type in ("group", "supergroup"),
+        "chat_type": chat_type,
+        "correct_mark": float(quiz["correct_mark"] or 1),
+        "neg_mark": float(quiz["negative_marking"] or 0),
+        "shuffle_q": False,
+        "shuffle_o": False,
+        "shuffle_o_count": 0,
+        "show_explanation": bool(quiz.get("show_explanation", False)),
+        "timer_override": None,
+        "anti_cheat": False,
+        "initiator_id": user.id,
+        "message_thread_id": getattr(message, "message_thread_id", None),
+    }
+    from .setup_wizard import show_correct_mark_prompt
+
+    await show_correct_mark_prompt(ctx, chat.id)
+
+
+async def _authorize_quiz_control(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> tuple[int, dict] | None:
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+    if not chat or not user or not message:
+        return None
+
+    session = session_mgr.get(chat.id)
+    if not session:
+        await safe_send_message(ctx, chat.id, "⚠️ No active quiz in this chat.")
+        return None
+
+    if chat.type == ChatType.PRIVATE:
+        if user.id != chat.id:
+            await safe_send_message(ctx, chat.id, "❌ You cannot control this quiz.")
+            return None
+    elif not await _require_admin(ctx, chat.id, user.id, _is_anon_admin(message)):
+        await safe_send_message(ctx, chat.id, "🔒 Only group admins can control this quiz.")
+        return None
+
+    return chat.id, session
+
+
+async def pause_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    authorized = await _authorize_quiz_control(update, ctx)
+    if not authorized:
+        return
+    chat_id, session = authorized
+    if session.get("paused"):
+        await safe_send_message(ctx, chat_id, "⏸️ The quiz is already paused.")
+        return
+    session["paused"] = True
+    await session_mgr.update(chat_id, session)
+    await safe_send_message(ctx, chat_id, "⏸️ Quiz paused. Use /resume to continue.")
+
+
+async def resume_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    authorized = await _authorize_quiz_control(update, ctx)
+    if not authorized:
+        return
+    chat_id, session = authorized
+    if not session.get("paused"):
+        await safe_send_message(ctx, chat_id, "▶️ The quiz is not paused.")
+        return
+    session["paused"] = False
+    await session_mgr.update(chat_id, session)
+    await safe_send_message(ctx, chat_id, "▶️ Quiz resumed.")
+
+
+async def stop_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    message = update.effective_message
+    if chat and user and message and chat.id in pending_quiz_settings and not session_mgr.get(chat.id):
+        # /stop should also cancel the setup wizard before the first poll is
+        # sent; otherwise a half-configured quiz blocks /start indefinitely.
+        pending = pending_quiz_settings.get(chat.id, {})
+        if chat.type == ChatType.PRIVATE:
+            allowed = user.id == chat.id
+        else:
+            allowed = user.id == pending.get("initiator_id") or await _require_admin(
+                ctx, chat.id, user.id, _is_anon_admin(message)
+            )
+        if not allowed:
+            await safe_send_message(ctx, chat.id, "🔒 Only the quiz initiator or a group admin can cancel this setup.")
+            return
+        pending_quiz_settings.pop(chat.id, None)
+        await safe_send_message(ctx, chat.id, "🛑 Quiz setup cancelled.")
+        return
+
+    authorized = await _authorize_quiz_control(update, ctx)
+    if not authorized:
+        return
+    chat_id, session = authorized
+    poll_message_id = session.get("active_poll_message_id")
+    if poll_message_id:
+        try:
+            await ctx.bot.stop_poll(chat_id=chat_id, message_id=poll_message_id)
+        except Exception as exc:
+            logger.debug("Unable to close active poll on stop: %s", exc)
+    tasks.cancel_all_for_chat(chat_id)
+    await session_mgr.delete(chat_id)
+    await safe_send_message(ctx, chat_id, "🛑 Quiz stopped by an administrator.")
+
+
+async def _change_speed(update: Update, ctx: ContextTypes.DEFAULT_TYPE, delta: int | None) -> None:
+    authorized = await _authorize_quiz_control(update, ctx)
+    if not authorized:
+        return
+    chat_id, session = authorized
+    if delta is None:
+        session["timer_override"] = None
+        session["modified_timer_offset"] = 0
+        await session_mgr.update(chat_id, session)
+        await safe_send_message(ctx, chat_id, "⏱️ Timer reset to the quiz and section defaults for upcoming questions.")
+        return
+
+    base = session.get("timer_override") or session.get("current_section_timer") or session.get("quiz_data", {}).get("timer", 30)
+    current_offset = int(session.get("modified_timer_offset", 0))
+    effective = clamp_quiz_timer(int(base) + current_offset + int(delta))
+    session["modified_timer_offset"] = effective - int(base)
+    await session_mgr.update(chat_id, session)
+    await safe_send_message(ctx, chat_id, f"⏱️ Timer set to {format_timer(effective)} for upcoming questions.")
+
+
+async def timer_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set an exact per-question timer for the remainder of the active quiz."""
+    chat = update.effective_chat
+    if not chat:
+        return
+    if len(ctx.args or []) != 1:
+        await safe_send_message(ctx, chat.id, "Usage: <code>/timer 90</code>\nSet 10 seconds to 60 minutes for upcoming questions.", parse_mode=ParseMode.HTML)
+        return
+    try:
+        seconds = validate_quiz_timer(ctx.args[0])
+    except ValueError as exc:
+        await safe_send_message(ctx, chat.id, f"❌ {exc}")
+        return
+
+    authorized = await _authorize_quiz_control(update, ctx)
+    if not authorized:
+        return
+    chat_id, session = authorized
+    session["timer_override"] = seconds
+    session["modified_timer_offset"] = 0
+    await session_mgr.update(chat_id, session)
+    await safe_send_message(
+        ctx, chat_id,
+        f"⏱️ Timer changed to <b>{format_timer(seconds)}</b> per question from the next question. The currently open poll is unchanged.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def slow_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _change_speed(update, ctx, 5)
+
+
+async def fast_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _change_speed(update, ctx, -5)
+
+
+async def normal_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _change_speed(update, ctx, None)
+
+
+async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    if not chat:
+        return
+    session = session_mgr.get(chat.id)
+    if not session or session.get("is_private"):
+        await safe_send_message(ctx, chat.id, "⚠️ No group quiz leaderboard is available right now.")
+        return
+
+    quiz = session.get("quiz_data", {})
+    participants = session.get("participants", {})
+    polls = session.get("polls", {})
+    correct_mark = float(quiz.get("correct_mark", quiz.get("correct_marks", 1)) or 1)
+    negative_marking = float(quiz.get("negative_marking", quiz.get("negative_marks", 0)) or 0)
+    rows: list[tuple[str, float, int, int, float]] = []
+    for participant in participants.values():
+        correct = wrong = 0
+        total_time = 0.0
+        answers = participant.get("answers", {})
+        for poll_id, poll_data in polls.items():
+            answer = answers.get(poll_id)
+            if not answer:
+                continue
+            elapsed = max(0.0, float(answer.get("time", 0)) - float(poll_data.get("sent_time", 0)))
+            total_time += elapsed
+            if is_correct(answer.get("option", []), poll_data.get("correct_option", [])):
+                correct += 1
+            else:
+                wrong += 1
+        score = correct * correct_mark - wrong * negative_marking
+        rows.append((participant.get("name", "Aspirant"), score, correct, wrong, total_time))
+
+    rows.sort(key=lambda item: (item[1], -item[4]), reverse=True)
+    if not rows:
+        await safe_send_message(ctx, chat.id, "📊 No answers have been recorded yet.")
+        return
+
+    lines = [f"🏆 <b>Live Leaderboard</b> — {escape(quiz.get('quiz_name', 'Quiz'))}"]
+    for rank, (name, score, correct, wrong, total_time) in enumerate(rows[:20], 1):
+        minutes, seconds = divmod(int(total_time), 60)
+        lines.append(
+            f"{rank}. <b>{escape(name)}</b> — {score:.2f} pts | "
+            f"✅ {correct}  ❌ {wrong} | ⏱️ {minutes}m {seconds}s"
+        )
+    await safe_send_message(ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     answer = update.poll_answer
     if not answer:
@@ -968,4 +1267,13 @@ async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
 
 def register(application: Application) -> None:
+    application.add_handler(CommandHandler("start", start_quiz_command))
+    application.add_handler(CommandHandler("pause", pause_command))
+    application.add_handler(CommandHandler("resume", resume_command))
+    application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("slow", slow_command))
+    application.add_handler(CommandHandler("fast", fast_command))
+    application.add_handler(CommandHandler("normal", normal_command))
+    application.add_handler(CommandHandler("timer", timer_command))
+    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(PollAnswerHandler(poll_answer_handler))
