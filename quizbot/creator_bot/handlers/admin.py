@@ -12,7 +12,7 @@ import logging
 import time
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from quizbot.database import (
     LeaderboardRepository,
@@ -30,66 +30,231 @@ from ..ratelimit import ratelimit
 
 logger = logging.getLogger(__name__)
 
-FEATURES_TEXT = (
-    "**Features**\n\n"
-    "- Create questions from text, with the correct option marked\n"
-    "- Marathon quiz mode\n"
-    "- Convert forwarded polls into quiz questions\n"
-    "- Smart word filtering\n"
-    "- Bulk question import (paste or .txt file)\n"
-    "- Negative marking\n"
-    "- Full quiz editor (rename, timer, type, questions, permissions)\n"
-    "- Quiz analytics and leaderboards\n"
-    "- Inline query support for sharing quizzes\n"
-    "- Free and paid quizzes with batch bundling\n"
-    "- HTML exam-style and analysis reports\n"
-    "- Sectional quizzes with per-section timers\n"
-)
+HELP_PAGES: dict[str, str] = {
+    "home": (
+        "🎓 **QUIZBOT CONTROL CENTRE**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Your workspace to create, organise, share and run quizzes.\n\n"
+        "Choose a section below. Each section has the commands and examples you need.\n\n"
+        "💡 **Quick start**\n"
+        "Create: `/create`  ·  Library: `/myquizzes`  ·  Play: `/start QUIZ_ID`"
+    ),
+    "create": (
+        "🧩 **CREATE & MANAGE**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Build a quiz, add questions and manage your saved sets.\n\n"
+        "➕ **Create**\n"
+        "`/create` — start a new quiz\n"
+        "`/done` — finish and save it\n"
+        "`/cancel` — discard the current creation\n\n"
+        "🛠 **Manage**\n"
+        "`/edit <quiz_id>` — open the quiz editor\n"
+        "`/stopedit` — leave the editor\n"
+        "`/del <quiz_id>` — delete one of your quizzes\n"
+        "`/info <quiz_id>` — view quiz details\n"
+        "`/setpromo <text>` — set a promo message on your quizzes\n\n"
+        "📥 You can add questions by sending text, forwarding quiz polls, or uploading a supported `.txt` file."
+    ),
+    "library": (
+        "📚 **YOUR QUIZ LIBRARY**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Find and reopen the quizzes you have created.\n\n"
+        "`/myquizzes` — show your quiz library\n"
+        "`/myquizzes <term>` — search your own quizzes\n"
+        "`/info <quiz_id>` — inspect a quiz\n"
+        "`/edit <quiz_id>` — edit questions and settings\n"
+        "`/del <quiz_id>` — remove a quiz\n\n"
+        "Use the **Discover** section to search public quizzes or share your own."
+    ),
+    "discover": (
+        "🔎 **DISCOVER & SHARE**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Search public quizzes and share them with a group.\n\n"
+        "`/search <word>` — search public quizzes\n"
+        "`/quiz <word>` — shortcut for public search\n"
+        "`/leaders <quiz_id>` — full quiz leaderboard\n"
+        "`/aspirants <quiz_id>` — leaderboard shortcut\n\n"
+        "🔗 **Sharing**\n"
+        "Open a quiz from `/myquizzes` and use its Start link, or share the quiz ID and launch it with `/start QUIZ_ID`."
+    ),
+    "access": (
+        "📦 **BATCHES & ACCESS**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Bundle quizzes and control access to paid quiz sets.\n\n"
+        "📦 **Batches**\n"
+        "`/batch` — manage your batches\n"
+        "`/createbatch` — create a batch\n"
+        "`/searchbatch <term>` — find a batch\n\n"
+        "🔐 **Paid quiz access**\n"
+        "`/add <chat_id>` — authorise a chat\n"
+        "`/rem <chat_id>` — revoke chat access\n"
+        "`/remall` — clear paid-quiz authorisations\n"
+        "`/auth` — view authorised chats\n"
+        "`/removeuser <user_id>` — revoke a user's premium access (owner only)"
+    ),
+    "player": (
+        "🎮 **QUIZ PLAYER**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Launch and control quizzes in private chats and groups.\n\n"
+        "🚀 **Launch & control**\n"
+        "`/start <id> [skip]` — launch a quiz\n"
+        "`/pause` · `/resume` · `/stop` — control a session\n"
+        "`/leaderboard` — view the live group leaderboard\n\n"
+        "⏱ **Timing**\n"
+        "`/slow` · `/fast` — adjust upcoming questions\n"
+        "`/normal` — restore the quiz timer\n"
+        "`/timer <seconds>` — set 10–3600 seconds\n\n"
+        "🧪 **Other modes**\n"
+        "`/pollquiz <quiz_id>` · `/pollstop` — non-expiring poll mode\n"
+        "`/mix <count> <id1> <id2> ...` — mix quiz sets\n"
+        "`/schedule` · `/viewschedule` · `/cancelschedule` — schedule a group quiz"
+    ),
+    "reports": (
+        "📊 **REPORTS & RESULTS**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Review results and create shareable reports.\n\n"
+        "`/whtml <quiz_id>` — interactive HTML quiz report\n"
+        "`/testseries <ids>` — generate a PDF test series (when configured)\n"
+        "`/html` — configure HTML result reports\n"
+        "`/pdf` — configure PDF result reports\n"
+        "`/leaders <quiz_id>` — view the full leaderboard\n\n"
+        "Reports are generated from recorded quiz attempts; available output depends on the quiz and deployment configuration."
+    ),
+    "ai": (
+        "🤖 **AI, PDF & IMPORT TOOLS**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Create question sets faster with AI and document imports.\n\n"
+        "✨ **AI quiz**\n"
+        "`/aiquiz <topic>` — generate a quiz from a topic\n"
+        "`/setkey <provider> <key>` — add an AI provider key\n"
+        "`/mykeys` — list your saved AI keys\n"
+        "`/delkey <provider>` — remove an AI key\n\n"
+        "📄 **PDF & imports**\n"
+        "`/pdfquiz` — reply to a PDF to create a quiz\n"
+        "Send question text, forward a quiz poll, or upload a `.txt` file while creating a quiz.\n\n"
+        "🌐 `/trans <lang>` — translate quiz questions\n"
+        "🧹 `/remove <words>` · `/mywords` · `/clearlist` — manage import word filters"
+    ),
+    "account": (
+        "⚙️ **ACCOUNT & SETTINGS**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Manage premium access and creator preferences.\n\n"
+        "`/pay` — buy or renew premium\n"
+        "`/settings` — creator settings and quick-save defaults\n"
+        "`/limit` — view your command rate-limit status\n"
+        "`/features` — view the feature overview\n"
+        "`/help` — reopen this control centre\n\n"
+        "Need help? Send the relevant command and its error message when contacting the project maintainer."
+    ),
+    "features": (
+        "✨ **BUILT FOR ADVANCED QUIZZING**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• Manual, bulk-text, forwarded-poll and PDF question imports\n"
+        "• AI-assisted quiz generation with configurable providers\n"
+        "• Standard, sectional and marathon quiz modes\n"
+        "• Per-question timers, including custom durations up to 60 minutes\n"
+        "• Negative marking, shuffle controls and quiz editing\n"
+        "• Public discovery, inline query sharing and quiz batches\n"
+        "• Free and paid access controls\n"
+        "• Live leaderboards, HTML reports and PDF test series\n"
+        "• Group scheduling, translation and a Telegram Mini App\n\n"
+        "Choose a section from the menu to see how to use each feature."
+    ),
+    "owner": (
+        "🛠 **OWNER & ADMIN TOOLS**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "These commands are restricted to configured owners or admins.\n\n"
+        "`/statses` — platform usage statistics\n"
+        "`/testapi` — test database connectivity\n"
+        "`/gcast` — broadcast a replied-to message\n"
+        "`/stopcast` — stop an active broadcast\n"
+        "`/listquiz` — list platform quizzes\n"
+        "`/ban <quiz_id>` — ban a quiz\n"
+        "`/delall` — delete all quizzes\n"
+        "`/convertall` — convert paid quizzes to free\n\n"
+        "⚠️ Use destructive actions carefully."
+    ),
+}
 
-HELP_TEXT = (
-    "**Creator Bot -- Command Guide**\n\n"
-    "**Creating & managing quizzes**\n"
-    "`/create` -- start creating a new quiz\n"
-    "`/done` -- finish and save the quiz you're creating\n"
-    "`/cancel` -- cancel the quiz you're currently creating\n"
-    "`/edit <id>` -- edit one of your existing quizzes\n"
-    "`/del <id>` -- delete one of your quizzes\n"
-    "`/remall` -- clear your paid-quiz chat authorizations\n"
-    "`/info <id>` -- show details about a quiz\n\n"
-    "**Finding & sharing**\n"
-    "`/myquizzes [term]` -- list (or search) your quizzes\n"
-    "`/search word` (or `/quiz`) -- search all public quizzes\n"
-    "`/leaders <id>` (or `/aspirants`) -- full leaderboard\n\n"
-    "**Paid quiz access**\n"
-    "`/add <chat_id>` -- authorize a chat for your paid quizzes\n"
-    "`/rem <chat_id>` -- remove a chat's access\n"
-    "`/setpromo text` -- set a promo message on all your quizzes\n\n"
-    "**Reports**\n"
-    "`/whtml <id>` -- interactive HTML quiz report\n"
-    "`/testseries <ids>` -- PDF test-series generator (if configured)\n"
-    "`/html`, `/pdf` -- configure result reports\n\n"
-    "**Playing quizzes (groups and private chats)**\n"
-    "`/start <id> [skip]` -- launch a saved quiz\n"
-    "`/pause`, `/resume`, `/stop` -- control a running quiz\n"
-    "`/slow`, `/fast`, `/normal` -- adjust question timing\n"
-    "`/timer <seconds>` -- set an exact timer for upcoming questions (10–3600)\n"
-    "`/leaderboard` -- show the live group leaderboard\n"
-    "`/pollquiz <id>`, `/pollstop` -- run non-expiring quiz polls\n"
-    "`/mix <count> <id1> <id2> ...` -- mix quizzes\n"
-    "`/aiquiz <topic>`, `/pdfquiz` -- generate quizzes\n"
-    "`/schedule`, `/viewschedule`, `/cancelschedule` -- schedule group quizzes\n"
-    "`/trans <lang>` -- translate quiz questions\n\n"
-    "**AI keys**\n"
-    "`/setkey provider key`, `/mykeys`, `/delkey provider`\n\n"
-    "**Word filters**\n"
-    "`/remove word1 word2`, `/mywords`, `/clearlist`\n\n"
-    "**Batches**\n"
-    "`/batch`, `/createbatch`, `/searchbatch term`\n\n"
-    "**Account**\n"
-    "`/pay` -- buy or renew premium\n"
-    "`/settings` -- creator settings\n"
-    "`/features` -- feature overview\n"
-)
+_HELP_HOME_ROWS = [
+    [("➕ Create & Manage", "create"), ("📚 My Quizzes", "library")],
+    [("🔎 Discover & Share", "discover"), ("📦 Batches & Access", "access")],
+    [("🎮 Quiz Player", "player"), ("📊 Reports", "reports")],
+    [("🤖 AI & Imports", "ai"), ("⚙️ Account", "account")],
+    [("✨ Features", "features")],
+]
+
+
+def _help_keyboard(page: str, user_id: int) -> InlineKeyboardMarkup:
+    """Build the compact inline navigation for the help control centre."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if page == "home":
+        for row in _HELP_HOME_ROWS:
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"hmenu:{target}")
+                for label, target in row
+            ])
+        if _is_owner_or_admin(user_id):
+            rows.append([InlineKeyboardButton("🛠 Owner Tools", callback_data="hmenu:owner")])
+    else:
+        related = {
+            "create": [("📚 My Quizzes", "library"), ("🤖 AI & Imports", "ai")],
+            "library": [("➕ Create & Manage", "create"), ("🔎 Discover", "discover")],
+            "discover": [("📚 My Quizzes", "library"), ("📊 Reports", "reports")],
+            "access": [("📚 My Quizzes", "library"), ("⚙️ Account", "account")],
+            "player": [("📊 Reports", "reports"), ("🔎 Discover", "discover")],
+            "reports": [("🎮 Quiz Player", "player"), ("📚 My Quizzes", "library")],
+            "ai": [("➕ Create & Manage", "create"), ("⚙️ Account", "account")],
+            "account": [("💎 Features", "features"), ("📦 Batches", "access")],
+            "features": [("➕ Create & Manage", "create"), ("🎮 Quiz Player", "player")],
+            "owner": [("📊 Reports", "reports"), ("⚙️ Account", "account")],
+        }
+        destinations = related.get(page, [])
+        if destinations:
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"hmenu:{target}")
+                for label, target in destinations
+            ])
+    rows.append([
+        InlineKeyboardButton("⌂ Main Menu", callback_data="hmenu:home"),
+        InlineKeyboardButton("✖ Close", callback_data="hmenu:close"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def help_menu_callback(c: Client, cb: CallbackQuery) -> None:
+    """Navigate the /help control centre without sending a new message."""
+    page = (cb.data or "").partition(":")[2]
+    if page == "close":
+        try:
+            if cb.message:
+                await cb.message.delete()
+            await cb.answer("Menu closed.")
+        except Exception:
+            await cb.answer()
+        return
+
+    if page not in HELP_PAGES:
+        await cb.answer("This menu button has expired. Send /help to reopen it.", show_alert=True)
+        return
+    if page == "owner" and not _is_owner_or_admin(cb.from_user.id):
+        await cb.answer("Owner/admin access only.", show_alert=True)
+        return
+    if not cb.message:
+        await cb.answer()
+        return
+
+    try:
+        await cb.message.edit_text(
+            HELP_PAGES[page],
+            reply_markup=_help_keyboard(page, cb.from_user.id),
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        # A rapid double tap can produce MessageNotModified; it is harmless.
+        logger.debug("Help menu update failed for page=%s: %s", page, exc)
+    await cb.answer()
+
 
 
 @ratelimit("default")
@@ -156,14 +321,24 @@ async def start_cmd(c: Client, m: Message) -> None:
 
 @ratelimit("default")
 async def help_cmd(c: Client, m: Message) -> None:
-    """/help -- full command reference."""
-    await m.reply(HELP_TEXT)
+    """/help -- open the interactive Quizbot control centre."""
+    uid = m.from_user.id if m.from_user else 0
+    await m.reply(
+        HELP_PAGES["home"],
+        reply_markup=_help_keyboard("home", uid),
+        disable_web_page_preview=True,
+    )
 
 
 @ratelimit("default")
 async def features_cmd(c: Client, m: Message) -> None:
-    """/features -- short marketing-style feature overview."""
-    await m.reply(FEATURES_TEXT)
+    """/features -- open the feature overview with menu navigation."""
+    uid = m.from_user.id if m.from_user else 0
+    await m.reply(
+        HELP_PAGES["features"],
+        reply_markup=_help_keyboard("features", uid),
+        disable_web_page_preview=True,
+    )
 
 
 async def limit_cmd(c: Client, m: Message) -> None:
@@ -347,6 +522,7 @@ def register(app: Client) -> None:
     app.on_message(filters.command("start") & filters.private)(start_cmd)
     app.on_message(filters.command("help"))(help_cmd)
     app.on_message(filters.command("features"))(features_cmd)
+    app.on_callback_query(filters.regex(r"^hmenu:"))(help_menu_callback)
     app.on_message(filters.command("limit") & filters.private)(limit_cmd)
     app.on_message(filters.command("gcast") & filters.private)(gcast_cmd)
     app.on_message(filters.command("stopcast") & filters.private)(stopcast_cmd)
