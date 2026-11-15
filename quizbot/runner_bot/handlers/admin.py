@@ -10,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+)
 
 from quizbot.database import AuthChatRepository, QuizRepository, get_db
 from quizbot.shared import config
+from quizbot.creator_bot.handlers.admin import HELP_PAGES, _HELP_HOME_ROWS
 
 from ..state import channel_poll_tasks, rate_limiter, session_mgr
 from ..telegram_utils import safe_send_message
@@ -42,9 +45,120 @@ HELP_TEXT = (
 )
 
 
+def _is_help_owner(user_id: int) -> bool:
+    return user_id == config.OWNER_ID or user_id in config.ADMIN_IDS
+
+
+def _help_keyboard(page: str, user_id: int) -> InlineKeyboardMarkup:
+    """PTB equivalent of the creator adapter's interactive help keyboard.
+
+    Both adapters may receive different updates for the same bot account, so
+    this UI must be available on the runner side as well.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if page == "home":
+        for row in _HELP_HOME_ROWS:
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"hmenu:{target}")
+                for label, target in row
+            ])
+        if _is_help_owner(user_id):
+            rows.append([InlineKeyboardButton("🛠 Owner Tools", callback_data="hmenu:owner")])
+    else:
+        related = {
+            "create": [("📚 My Quizzes", "library"), ("🤖 AI & Imports", "ai")],
+            "library": [("➕ Create & Manage", "create"), ("🔎 Discover", "discover")],
+            "discover": [("📚 My Quizzes", "library"), ("📊 Reports", "reports")],
+            "access": [("📚 My Quizzes", "library"), ("⚙️ Account", "account")],
+            "player": [("📊 Reports", "reports"), ("🔎 Discover", "discover")],
+            "reports": [("🎮 Quiz Player", "player"), ("📚 My Quizzes", "library")],
+            "ai": [("➕ Create & Manage", "create"), ("⚙️ Account", "account")],
+            "account": [("✨ Features", "features"), ("📦 Batches", "access")],
+            "features": [("➕ Create & Manage", "create"), ("🎮 Quiz Player", "player")],
+            "owner": [("📊 Reports", "reports"), ("⚙️ Account", "account")],
+        }
+        destinations = related.get(page, [])
+        if destinations:
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"hmenu:{target}")
+                for label, target in destinations
+            ])
+    rows.append([
+        InlineKeyboardButton("⌂ Main Menu", callback_data="hmenu:home"),
+        InlineKeyboardButton("✖ Close", callback_data="hmenu:close"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/help` -- command reference."""
-    await safe_send_message(ctx, update.effective_chat.id, HELP_TEXT, parse_mode=ParseMode.HTML)
+    """`/help` -- open the modern Quizbot control centre.
+
+    This duplicates the creator-side entry point intentionally: Telegram may
+    deliver an update to either active bot session, and the runner used to
+    ignore /help entirely.
+    """
+    message = update.effective_message
+    user = update.effective_user
+    if not message:
+        return
+    await message.reply_text(
+        HELP_PAGES["home"],
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_help_keyboard("home", user.id if user else 0),
+        disable_web_page_preview=True,
+    )
+
+
+async def features_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """`/features` -- open the interactive feature overview."""
+    message = update.effective_message
+    user = update.effective_user
+    if not message:
+        return
+    await message.reply_text(
+        HELP_PAGES["features"],
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_help_keyboard("features", user.id if user else 0),
+        disable_web_page_preview=True,
+    )
+
+
+async def help_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle hmenu callbacks if Telegram routes them to the runner session."""
+    query = update.callback_query
+    if not query:
+        return
+    page = (query.data or "").partition(":")[2]
+
+    if page == "close":
+        try:
+            if query.message:
+                await query.message.delete()
+        finally:
+            await query.answer("Menu closed.")
+        return
+
+    if page not in HELP_PAGES:
+        await query.answer("This menu button has expired. Send /help to reopen it.", show_alert=True)
+        return
+    if page == "owner" and not _is_help_owner(query.from_user.id):
+        await query.answer("Owner/admin access only.", show_alert=True)
+        return
+    if not query.message:
+        await query.answer()
+        return
+
+    try:
+        await query.edit_message_text(
+            HELP_PAGES[page],
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_help_keyboard(page, query.from_user.id),
+            disable_web_page_preview=True,
+        )
+    except Exception as exc:
+        # Ignore harmless rapid double-taps / Message is not modified errors.
+        logger.debug("Runner help-menu edit failed for page=%s: %s", page, exc)
+    await query.answer()
 
 
 async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -130,6 +244,10 @@ async def watchdog_loop() -> None:
 
 
 def register(application: Application) -> None:
-    # /help is owned by the creator-side adapter so a single-bot deployment
-    # never emits duplicate replies from both update clients.
+    # Register the help UI here as well as in the creator adapter. Telegram
+    # distributes updates among the bot's active sessions, so either adapter
+    # may receive /help or an hmenu callback.
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("features", features_command))
+    application.add_handler(CallbackQueryHandler(help_menu_callback, pattern=r"^hmenu:"))
     application.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.CHANNEL, handle_channel_command))
