@@ -415,7 +415,7 @@ async def _end_private_section(chat_id: int) -> None:
     await end_private_quiz(chat_id, ctx)
 
 
-async def end_private_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def end_private_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, ended_early: bool = False) -> None:
     try:
         s = await session_mgr.delete(chat_id)
         if not s:
@@ -450,11 +450,12 @@ async def end_private_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
         qname = quiz_data.get("quiz_name", "Unnamed Quiz")
         txt = (
-            f"🏆 <b>Quiz Completed!</b>\n\n"
+            f"🏁 <b>{'Quiz Ended Early' if ended_early else 'Quiz Completed!'}</b>\n\n"
             f"📝 Quiz: {escape(str(qname))}\n📊 Total: {total}\n\n"
             f"📈 <b>Your Performance:</b>\n"
             f"✅ Correct: {correct}\n❌ Wrong: {wrong}\n"
             f"🎯 Score: {score:.2f}\n⏱️ Time: {int(minutes)}m {int(seconds)}s\n"
+            f"📝 Answered: {correct + wrong}/{total}\n"
             f"📊 Percentage: {pct:.1f}%\n🎯 Accuracy: {acc:.1f}%"
         )
         await safe_send_message(ctx, chat_id, txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
@@ -832,7 +833,7 @@ async def handle_group_poll_answer(poll_id: str, user_id: int, option_ids: list,
         return
 
 
-async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: Any) -> None:
+async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: Any, ended_early: bool = False) -> None:
     thread_id = _get_topic_thread_id(update)
     try:
         # Allow Telegram poll_answer updates from the final poll to finish
@@ -849,7 +850,8 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
         correct_mark = quiz_data.get("correct_mark", 1)
         participants = s.get("participants", {})
 
-        await safe_send_message(ctx, chat_id, "🏁 <b>Quiz Finished!</b> Calculating final scores...", parse_mode=ParseMode.HTML, thread_id=thread_id)
+        status = "Quiz Ended Early" if ended_early else "Quiz Finished!"
+        await safe_send_message(ctx, chat_id, f"🏁 <b>{status}</b> Calculating final scores...", parse_mode=ParseMode.HTML, thread_id=thread_id)
 
         user_summary = []
         for uid, udata in participants.items():
@@ -882,11 +884,16 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
             pass
 
         qname = quiz_data.get("quiz_name", "Unnamed Quiz")
-        lines = [f"🏆 <b>Final Leaderboard — {escape(str(qname))}</b>\n📊 Total Questions: {total}\n"]
+        board_label = "Partial Leaderboard" if ended_early else "Final Leaderboard"
+        lines = [f"🏆 <b>{board_label} — {escape(str(qname))}</b>\n📊 Total Questions: {total}\n"]
         for rank, u in enumerate(user_summary[:10], 1):
             med = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"{rank}."
             m, sec = divmod(int(u["total_time"]), 60)
-            lines.append(f"{med} <b>{escape(str(u['name']))}</b>: {u['score']:.2f} pts ({u['correct']}✅ {u['wrong']}❌) in {m}m {sec}s")
+            answered = u["correct"] + u["wrong"]
+            lines.append(
+                f"{med} <b>{escape(str(u['name']))}</b>: {u['score']:.2f} pts "
+                f"({u['correct']}✅ {u['wrong']}❌; {answered}/{total} answered) in {m}m {sec}s"
+            )
 
         if not user_summary:
             lines.append("No player answers were received by the bot, so no individual scores could be calculated. Check that the quiz poll is non-anonymous and that the runner update handler is receiving poll_answer updates.")
@@ -1176,9 +1183,13 @@ async def stop_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await ctx.bot.stop_poll(chat_id=chat_id, message_id=poll_message_id)
         except Exception as exc:
             logger.debug("Unable to close active poll on stop: %s", exc)
+    # Stop the question loop, but preserve the session long enough to calculate
+    # and publish the partial leaderboard instead of discarding everyone's work.
     tasks.cancel_all_for_chat(chat_id)
-    await session_mgr.delete(chat_id)
-    await safe_send_message(ctx, chat_id, "🛑 Quiz stopped by an administrator.")
+    if session.get("is_private"):
+        await end_private_quiz(chat_id, ctx, ended_early=True)
+    else:
+        await _end_group_quiz(chat_id, ctx, update, ended_early=True)
 
 
 async def _change_speed(update: Update, ctx: ContextTypes.DEFAULT_TYPE, delta: int | None) -> None:
@@ -1303,7 +1314,7 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         if not poll_rows:
             lines.append("No answers have been recorded yet. Participants must answer the individual polls in this group.")
         if not pollquiz_session.get("finalized"):
-            lines.append("\nThis is a live snapshot. When everyone finishes, run /pollstop to close polls and save the final results.")
+            lines.append("\nThis is a live snapshot. The bot will close the polls and publish the final leaderboard automatically when the configured quiz duration ends. /pollstop can end it early.")
         await safe_send_message(
             ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML,
             thread_id=pollquiz_session.get("message_thread_id"),
