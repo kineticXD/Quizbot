@@ -54,7 +54,7 @@ async def run_creator_bot(stop_event: asyncio.Event | None = None) -> None:
 
     await app.start()
     me = await app.get_me()
-    logger.info("Creator Bot started as @%s", me.username)
+    logger.info("Creator adapter started as @%s", me.username)
 
     own_event = stop_event or asyncio.Event()
     try:
@@ -62,9 +62,9 @@ async def run_creator_bot(stop_event: asyncio.Event | None = None) -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        logger.info("Stopping Creator Bot...")
+        logger.info("Stopping creator adapter...")
         await app.stop()
-        logger.info("Creator Bot stopped.")
+        logger.info("Creator adapter stopped.")
 
 
 if __name__ == "__main__":
