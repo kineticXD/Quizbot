@@ -23,6 +23,7 @@ from quizbot.database import CreatorSettingsRepository, QuizRepository, UserRepo
 from quizbot.shared import config
 from quizbot.shared.mini_app_link import mini_app_web_app_button
 from quizbot.shared.utils import is_premium_user
+from quizbot.shared.timers import validate_quiz_timer
 
 from .. import state
 from ..parsing import filter_words, parse_question_block, strip_source_noise
@@ -59,6 +60,10 @@ _RESERVED_COMMANDS = [
     "batch", "createbatch", "searchbatch", "stopedit", "whtml", "testseries",
     "tsr", "mocktest", "features", "gcast", "stopcast", "statses", "testapi",
     "leaders", "aspirants", "limit", "listquiz", "removeuser",
+    # Runner-side controls must never be mistaken for quiz question text.
+    "pause", "resume", "stop", "slow", "fast", "normal", "timer", "leaderboard",
+    "pollquiz", "pollstop", "mix", "aiquiz", "pdfquiz", "schedule", "viewschedule",
+    "cancelschedule", "trans",
 ]
 
 MIN_QUESTIONS = 10
@@ -469,16 +474,14 @@ async def handle_creation_message(c: Client, m: Message) -> None:
         del ud["awaiting_question_range"]
         ud["last_range_end"] = end
         ud["awaiting_section_timer"] = True
-        await m.reply("⏱️ Section timer in seconds (>10):")
+        await m.reply("⏱️ Section timer in seconds (10–3600):")
         return
 
     if ud.get("awaiting_section_timer"):
         try:
-            timer = int(m.text.strip())
-            if timer <= 10:
-                raise ValueError
+            timer = validate_quiz_timer(m.text.strip())
         except ValueError:
-            await m.reply("⚠️ Enter a number > 10.")
+            await m.reply("⚠️ Enter a whole number from 10 to 3600 seconds.")
             return
         ud["sections"][-1]["timer"] = timer
         del ud["awaiting_section_timer"]
