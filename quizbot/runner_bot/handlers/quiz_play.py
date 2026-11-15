@@ -78,12 +78,22 @@ def _is_anon_admin(message) -> bool:
 
 
 async def _require_admin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: Optional[int], is_anon: bool) -> bool:
-    """Return True if the caller may run admin-only quiz-control commands."""
+    """Return True for configured bot owners/admins or Telegram group admins.
+
+    OWNER_ID/ADMIN_IDS are global bot-control identities. They must not be
+    forced to also hold Telegram administrator status in every group where
+    the bot is installed. Group-local administrators remain supported.
+    """
     if is_anon:
+        return True
+    if user_id is None:
+        return False
+    if user_id == config.OWNER_ID or user_id in config.ADMIN_IDS:
         return True
     try:
         member = await ctx.bot.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "creator")
+        status = getattr(member.status, "value", member.status)
+        return str(status).lower() in ("administrator", "creator")
     except Exception:
         return False
 
@@ -834,46 +844,71 @@ async def handle_group_poll_answer(poll_id: str, user_id: int, option_ids: list,
 
 
 async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: Any, ended_early: bool = False) -> None:
-    thread_id = _get_topic_thread_id(update)
-    try:
-        # Allow Telegram poll_answer updates from the final poll to finish
-        # dispatching before the live session is removed.
-        await asyncio.sleep(2.0)
-        s = await session_mgr.delete(chat_id)
-        if not s:
-            return
+    """Finalize a group quiz and publish its leaderboard exactly once.
 
-        quiz_data = s["quiz_data"]
-        questions = s["questions"]
+    Older launch paths (setup wizard, AI quiz, PDF quiz) stored questions
+    inside quiz_data but did not duplicate them at session["questions"].
+    Read both shapes so stopping a quiz cannot fail with KeyError. Keep the
+    session until the leaderboard is sent and persistence succeeds, allowing
+    an administrator to retry after a transient Telegram/MongoDB failure.
+    """
+    thread_id = _get_topic_thread_id(update)
+    s = session_mgr.get(chat_id)
+    if not s:
+        return
+    if s.get("finalizing"):
+        logger.info("Quiz finalization already in progress for chat=%s", chat_id)
+        return
+
+    s["finalizing"] = True
+    try:
+        # Allow the last poll_answer update to be dispatched before scoring.
+        await asyncio.sleep(1.5)
+        s = session_mgr.get(chat_id) or s
+        quiz_data = s.get("quiz_data") or s.get("quiz") or {}
+        questions = s.get("questions") or quiz_data.get("questions") or []
+        if not questions:
+            raise ValueError("The active quiz session has no question data")
+
         total = len(questions)
-        neg = quiz_data.get("negative_marking", 0)
-        correct_mark = quiz_data.get("correct_mark", 1)
-        participants = s.get("participants", {})
+        neg = float(quiz_data.get("negative_marking", quiz_data.get("negative_marks", 0)) or 0)
+        correct_mark = float(quiz_data.get("correct_mark", quiz_data.get("correct_marks", 1)) or 1)
+        participants = s.get("participants", {}) or {}
+        polls = s.get("polls", {}) or {}
 
         status = "Quiz Ended Early" if ended_early else "Quiz Finished!"
-        await safe_send_message(ctx, chat_id, f"🏁 <b>{status}</b> Calculating final scores...", parse_mode=ParseMode.HTML, thread_id=thread_id)
+        if not s.get("ending_status_sent"):
+            await safe_send_message(
+                ctx, chat_id, f"🏁 <b>{status}</b> Calculating final scores...",
+                parse_mode=ParseMode.HTML, thread_id=thread_id,
+            )
+            s["ending_status_sent"] = True
 
         user_summary = []
         for uid, udata in participants.items():
             correct = wrong = 0
             total_time = 0.0
-            for pid, pinfo in s.get("polls", {}).items():
-                if pid in udata.get("answers", {}):
-                    ans = udata["answers"][pid]
-                    total_time += max(0, ans["time"] - pinfo["sent_time"])
-                    if is_correct(ans["option"], pinfo["correct_option"]):
-                        correct += 1
-                    else:
-                        wrong += 1
+            answers = udata.get("answers", {}) or {}
+            for pid, pinfo in polls.items():
+                ans = answers.get(pid)
+                if not ans:
+                    continue
+                answer_time = float(ans.get("time", pinfo.get("sent_time", 0)) or 0)
+                sent_time = float(pinfo.get("sent_time", answer_time) or 0)
+                total_time += max(0.0, answer_time - sent_time)
+                if is_correct(ans.get("option", []), pinfo.get("correct_option", [])):
+                    correct += 1
+                else:
+                    wrong += 1
 
             score = (correct * correct_mark) - (wrong * neg)
             user_summary.append({
-                "user_id": uid, "name": udata.get("name", "Aspirant"),
+                "user_id": int(uid), "name": udata.get("name", "Aspirant"),
                 "correct": correct, "wrong": wrong, "score": score,
-                "total_time": total_time, "answers": udata.get("answers", {}),
+                "total_time": total_time, "answers": answers,
             })
 
-        user_summary.sort(key=lambda x: (x["score"], -x["total_time"]), reverse=True)
+        user_summary.sort(key=lambda x: (float(x["score"]), -float(x["total_time"])), reverse=True)
 
         chat_title = "Group Chat"
         try:
@@ -881,41 +916,69 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
             if chat_obj and chat_obj.title:
                 chat_title = chat_obj.title
         except Exception:
-            pass
+            logger.debug("Could not read chat title for quiz results in %s", chat_id, exc_info=True)
 
-        qname = quiz_data.get("quiz_name", "Unnamed Quiz")
+        quiz_name = quiz_data.get("quiz_name", "Unnamed Quiz")
         board_label = "Partial Leaderboard" if ended_early else "Final Leaderboard"
-        lines = [f"🏆 <b>{board_label} — {escape(str(qname))}</b>\n📊 Total Questions: {total}\n"]
-        for rank, u in enumerate(user_summary[:10], 1):
-            med = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"{rank}."
-            m, sec = divmod(int(u["total_time"]), 60)
-            answered = u["correct"] + u["wrong"]
+        lines = [
+            f"🏆 <b>{board_label} — {escape(str(quiz_name))}</b>",
+            f"📊 Total Questions: {total}\n",
+        ]
+        for rank, user in enumerate(user_summary[:20], 1):
+            medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"{rank}."
+            minutes, seconds = divmod(int(user["total_time"]), 60)
+            answered = user["correct"] + user["wrong"]
             lines.append(
-                f"{med} <b>{escape(str(u['name']))}</b>: {u['score']:.2f} pts "
-                f"({u['correct']}✅ {u['wrong']}❌; {answered}/{total} answered) in {m}m {sec}s"
+                f"{medal} <b>{escape(str(user['name']))}</b>: {user['score']:.2f} pts "
+                f"({user['correct']}✅ {user['wrong']}❌; {answered}/{total} answered) "
+                f"in {minutes}m {seconds}s"
             )
 
         if not user_summary:
-            lines.append("No player answers were received by the bot, so no individual scores could be calculated. Check that the quiz poll is non-anonymous and that the runner update handler is receiving poll_answer updates.")
-
-        if len(user_summary) > 10:
-            lines.append(f"\n...and {len(user_summary) - 10} more participants!")
-        quiz_ref = quiz_data.get("question_set_id") or quiz_data.get("qid")
-        if quiz_ref:
-            lines.append(f"\nUse /leaderboard {escape(str(quiz_ref))} to reopen these saved scores.")
-
-        await safe_send_message(ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id)
-
-        if user_summary:
-            quiz_data_for_report = dict(quiz_data)
-            quiz_data_for_report["polls"] = s.get("polls", {})
-            await _record_attempt_and_report(
-                ctx, chat_id, quiz_data_for_report, user_summary, chat_title=chat_title,
-                protect_type=False, thread_id=thread_id,
+            lines.append(
+                "No participant answers were received. Make sure the quiz uses "
+                "non-anonymous polls and that the runner receives poll_answer updates."
             )
-    except Exception as e:
-        logger.error("_end_group_quiz error: %s", e, exc_info=True)
-        await safe_send_message(ctx, chat_id, "❌ Error ending quiz.", thread_id=thread_id)
+        elif len(user_summary) > 20:
+            lines.append(f"\n...and {len(user_summary) - 20} more participants.")
+
+        quiz_ref = quiz_data.get("question_set_id") or quiz_data.get("qid") or s.get("quiz_id")
+        if quiz_ref:
+            lines.append(f"\nSaved results can be reopened with /leaderboard {escape(str(quiz_ref))}.")
+
+        if not s.get("leaderboard_message_sent"):
+            sent_message = await safe_send_message(
+                ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id,
+            )
+            if sent_message is None:
+                raise RuntimeError("Telegram did not confirm delivery of the final leaderboard")
+            s["leaderboard_message_sent"] = True
+
+        if user_summary and not s.get("leaderboard_persisted"):
+            quiz_data_for_report = dict(quiz_data)
+            quiz_data_for_report["questions"] = questions
+            quiz_data_for_report["polls"] = polls
+            persisted = await _record_attempt_and_report(
+                ctx, chat_id, quiz_data_for_report, user_summary,
+                chat_title=chat_title, protect_type=False, thread_id=thread_id,
+            )
+            if not persisted:
+                # Preserve the session so /stop can retry persistence without
+                # duplicating the already-published leaderboard.
+                s["finalizing"] = False
+                return
+            s["leaderboard_persisted"] = True
+
+        await session_mgr.delete(chat_id)
+    except Exception as exc:
+        logger.error("_end_group_quiz error for chat=%s: %s", chat_id, exc, exc_info=True)
+        s["finalizing"] = False
+        await safe_send_message(
+            ctx, chat_id,
+            "❌ I couldn't finish the results safely. Your quiz data has been kept; "
+            "an owner/admin can run /stop again after checking the bot logs.",
+            thread_id=thread_id,
+        )
 
 
 async def _record_attempt_and_report(
