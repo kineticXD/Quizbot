@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Optional
 
-from ..parsing import filter_words, parse_question_block, strip_source_noise
+from ..parsing import filter_words, parse_question_block, split_question_blocks, strip_source_noise
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def _process_txt(content: str, remove_words: list[str], out_questions: list[dict
 
     protected = re.sub(r"<ggn>(.*?)</ggn>", _replace_ggn, content, flags=re.DOTALL)
 
-    blocks = protected.strip().split("\n\n")
+    blocks = split_question_blocks(protected)
     processed = 0
 
     for block in blocks:
