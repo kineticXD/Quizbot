@@ -17,6 +17,7 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 from quizbot.database import QuizRepository, get_db
 from quizbot.shared import config
 from quizbot.shared.utils import is_premium_user
+from quizbot.shared.timers import validate_quiz_timer
 
 from .. import state
 from ..keyboards import quiz_editor_main_kb, quiz_editor_qmgr_kb, quiz_editor_settings_kb
@@ -244,9 +245,7 @@ async def _delete_range(m: Message, uid: int, qid: str, text: str) -> None:
 async def _update_field(m: Message, uid: int, qid: str, field: str, value: str) -> bool:
     try:
         if field == "timer":
-            value = int(value)
-            if value <= 10:
-                raise ValueError("Timer must be > 10")
+            value = validate_quiz_timer(value)
         elif field == "quiz_type":
             value = value.lower()
             if value not in ("free", "paid"):
@@ -410,7 +409,7 @@ async def _remove_permission(m: Message, uid: int, qid: str, text: str) -> None:
 _FIELD_MAP = {"ename": "quiz_name", "etimer": "timer", "etype": "quiz_type", "eneg": "negative_marks"}
 _FIELD_PROMPTS = {
     "quiz_name": "🏷️ New name:",
-    "timer": "⏱️ New timer in seconds (>10):",
+    "timer": "⏱️ New timer in seconds (10–3600):",
     "quiz_type": "🏷️ New type (free/paid):",
     "negative_marks": "➖ New negative marking (0-0.99):",
 }
@@ -610,4 +609,11 @@ def register(app: Client) -> None:
     app.on_callback_query(
         filters.regex(r"^(?!stg_|dtc_|plan_|pay_|buy_|qd_|srch_|bat_|prev:|next:|refresh:)")
     )(edit_tree_cb)
-    app.on_message(filters.text & filters.private & in_edit_session_filter())(handle_edit_text_input)
+    runner_commands = [
+        "start", "help", "pause", "resume", "stop", "slow", "fast", "normal",
+        "timer", "leaderboard", "pollquiz", "pollstop", "mix", "aiquiz", "pdfquiz",
+        "schedule", "viewschedule", "cancelschedule", "trans", "pay", "create",
+    ]
+    app.on_message(
+        filters.text & filters.private & in_edit_session_filter() & ~filters.command(runner_commands)
+    )(handle_edit_text_input)
