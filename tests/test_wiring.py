@@ -116,10 +116,39 @@ def test_pollquiz_has_non_anonymous_answer_tracking_and_finalization():
     assert "pollquiz_score_rows" in player
     assert "finalize_pollquiz" in poll_quiz
     assert "is_anonymous=is_anonymous" in poll_quiz
-    assert "run /pollstop" in poll_quiz.lower()
+    assert "auto_close_seconds" in poll_quiz
+    assert "open_period" in poll_quiz
+    assert "finalize_pollquiz(ctx, chat_id)" in poll_quiz
 
 
 def test_pollquiz_scores_use_real_repository_save_path():
     source = (ROOT / "quizbot/runner_bot/handlers/poll_quiz.py").read_text(encoding="utf-8")
     assert "_record_attempt_and_report(" in source
     assert "stop_poll" in source
+
+
+def test_pollquiz_auto_closes_and_publishes_final_leaderboard():
+    source = (ROOT / "quizbot/runner_bot/handlers/poll_quiz.py").read_text(encoding="utf-8")
+    assert "POLLQUIZ_AUTO_CLOSE_SECONDS" in source
+    assert 'poll_kwargs["open_period"]' in source
+    assert "await asyncio.sleep(auto_close_seconds + 7)" in source
+    assert "await finalize_pollquiz(ctx, chat_id)" in source
+    assert "Usage: /pollquiz QUIZ_ID [minutes]" in source
+
+
+def test_standard_quiz_stop_publishes_partial_leaderboard():
+    source = (ROOT / "quizbot/runner_bot/handlers/quiz_play.py").read_text(encoding="utf-8")
+    stop_start = source.index("async def stop_command")
+    stop_end = source.index("async def _change_speed", stop_start)
+    stop_source = source[stop_start:stop_end]
+    assert "end_private_quiz(chat_id, ctx, ended_early=True)" in stop_source
+    assert "_end_group_quiz(chat_id, ctx, update, ended_early=True)" in stop_source
+    assert "await session_mgr.delete(chat_id)" not in stop_source
+    assert "Partial Leaderboard" in source
+
+
+def test_pollquiz_duration_is_configurable():
+    config = (ROOT / "quizbot/shared/config.py").read_text(encoding="utf-8")
+    env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert 'POLLQUIZ_AUTO_CLOSE_SECONDS: int = _env_int("POLLQUIZ_AUTO_CLOSE_SECONDS", 3600)' in config
+    assert "POLLQUIZ_AUTO_CLOSE_SECONDS=3600" in env
