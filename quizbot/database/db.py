@@ -10,30 +10,32 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection, AsyncIOMotorDatabase
+from pymongo import AsyncMongoClient
+from pymongo.asynchronous.collection import AsyncCollection
+from pymongo.asynchronous.database import AsyncDatabase
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    """Thin holder for the shared Motor client/database handle, plus the
-    one-time index setup that used to be schema.sql's CREATE INDEX
-    statements."""
+    """Thin holder for the shared async MongoDB client/database handle and
+    the one-time index setup that used to be schema.sql's CREATE INDEX
+    statements. Uses PyMongo's native asyncio API."""
 
     def __init__(self, uri: str, db_name: str) -> None:
         self.uri = uri
         self.db_name = db_name
-        self._client: Optional[AsyncIOMotorClient] = None
-        self._db: Optional[AsyncIOMotorDatabase] = None
+        self._client: Optional[AsyncMongoClient] = None
+        self._db: Optional[AsyncDatabase] = None
 
     async def connect(self) -> None:
         if self._client is not None:
             return
         # serverSelectionTimeoutMS keeps a bad URI/network issue from hanging
         # the bot's startup indefinitely -- fails fast with a clear error
-        # instead. tz_aware makes datetimes returned by Motor timezone-aware
-        # (UTC), matching how the rest of the app already reasons about time.
-        self._client = AsyncIOMotorClient(
+        # instead. tz_aware makes returned datetimes timezone-aware (UTC),
+        # matching how the rest of the app already reasons about time.
+        self._client = AsyncMongoClient(
             self.uri, serverSelectionTimeoutMS=15000, tz_aware=True
         )
         self._db = self._client[self.db_name]
@@ -92,18 +94,18 @@ class Database:
 
     async def close(self) -> None:
         if self._client is not None:
-            self._client.close()
+            await self._client.close()
             self._client = None
             self._db = None
             logger.info("Database connection closed")
 
     @property
-    def db(self) -> AsyncIOMotorDatabase:
+    def db(self) -> AsyncDatabase:
         if self._db is None:
             raise RuntimeError("Database not connected. Call connect() first.")
         return self._db
 
-    def collection(self, name: str) -> AsyncIOMotorCollection:
+    def collection(self, name: str) -> AsyncCollection:
         return self.db[name]
 
 
