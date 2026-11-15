@@ -18,6 +18,7 @@ from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
 from quizbot.database import QuizPrefsRepository, get_db
 from quizbot.shared.utils import is_premium_user
+from quizbot.shared.timers import TIMER_PRESET_ROWS, clamp_quiz_timer, format_timer, validate_quiz_timer
 
 from ..quiz_utils import check_batch_access, resolve_quiz_access
 from ..state import pending_quiz_settings, rate_limiter, session_mgr, tasks
@@ -130,24 +131,21 @@ async def _show_shuffle_count_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: in
 
 
 async def _show_timer_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Prompt with expanded timer choices up to 4 minutes (240s)."""
+    """Show the full shared timer preset range (10 seconds to 10 minutes)."""
     ps = pending_quiz_settings.get(chat_id, {})
-    quiz_default = ps.get("quiz", {}).get("timer", 30)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("10s", callback_data=f"qs_tm_{chat_id}_10"),
-         InlineKeyboardButton("15s", callback_data=f"qs_tm_{chat_id}_15"),
-         InlineKeyboardButton("20s", callback_data=f"qs_tm_{chat_id}_20"),
-         InlineKeyboardButton("30s", callback_data=f"qs_tm_{chat_id}_30")],
-        [InlineKeyboardButton("45s", callback_data=f"qs_tm_{chat_id}_45"),
-         InlineKeyboardButton("60s (1m)", callback_data=f"qs_tm_{chat_id}_60"),
-         InlineKeyboardButton("90s", callback_data=f"qs_tm_{chat_id}_90")],
-        [InlineKeyboardButton("120s (2m)", callback_data=f"qs_tm_{chat_id}_120"),
-         InlineKeyboardButton("150s", callback_data=f"qs_tm_{chat_id}_150"),
-         InlineKeyboardButton("180s (3m)", callback_data=f"qs_tm_{chat_id}_180")],
-        [InlineKeyboardButton("240s (4m)", callback_data=f"qs_tm_{chat_id}_240"),
-         InlineKeyboardButton(f"⏭ Quiz default ({quiz_default}s)", callback_data=f"qs_tm_{chat_id}_default")],
+    quiz_default = clamp_quiz_timer(ps.get("quiz", {}).get("timer", 30))
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"qs_tm_{chat_id}_{seconds}") for seconds, label in row]
+        for row in TIMER_PRESET_ROWS
+    ]
+    rows.append([
+        InlineKeyboardButton(
+            f"⏭ Quiz default ({format_timer(quiz_default)})",
+            callback_data=f"qs_tm_{chat_id}_default",
+        )
     ])
-    await _setup_edit(ctx, chat_id, "⏱ <b>Timer per question?</b>\n\nSelect a time — Start button will appear after.", kb)
+    kb = InlineKeyboardMarkup(rows)
+    await _setup_edit(ctx, chat_id, "⏱ <b>Timer per question?</b>\n\nChoose 10 seconds to 10 minutes. You can also change the timer during a running quiz with <code>/timer 90</code>.", kb)
 
 
 async def _show_start_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, timer_label: str) -> None:
@@ -188,7 +186,7 @@ async def _show_section_mode_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int
     sections = ps.get("quiz", {}).get("sections", [])
     if not sections:
         t_val = ps.get('timer_override') or ps.get('quiz', {}).get('timer', 30)
-        await _show_start_prompt(ctx, chat_id, f"{t_val}s")
+        await _show_start_prompt(ctx, chat_id, format_timer(t_val))
         return
 
     sec_settings = ps.setdefault("section_settings", {})
@@ -202,7 +200,7 @@ async def _show_section_mode_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int
                 summary += f"• {sec.get('name', '?')}: quiz defaults\n"
             else:
                 mode = cfg.get("mode", "perpoll")
-                t_lbl = f"{cfg.get('slot_minutes', '?')}min slot" if mode == "slot" else f"{cfg.get('timer', 'default')}s/poll"
+                t_lbl = f"{cfg.get('slot_minutes', '?')}min slot" if mode == "slot" else f"{format_timer(cfg['timer'])}/poll" if cfg.get("timer") else "quiz default"
                 cm_lbl = cfg.get("correct_mark") or "global"
                 neg_lbl = cfg.get("neg_mark") if cfg.get("neg_mark") is not None else "global"
                 summary += f"• {sec.get('name', '?')}: {t_lbl}  +{cm_lbl}/-{neg_lbl}\n"
@@ -238,20 +236,13 @@ async def _show_sec_timer_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, s
         ])
         await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n🕐 <b>Total slot duration for this section?</b>", kb)
     else:
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("10s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_10"),
-             InlineKeyboardButton("15s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_15"),
-             InlineKeyboardButton("20s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_20"),
-             InlineKeyboardButton("30s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_30")],
-            [InlineKeyboardButton("45s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_45"),
-             InlineKeyboardButton("60s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_60"),
-             InlineKeyboardButton("90s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_90"),
-             InlineKeyboardButton("120s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_120")],
-            [InlineKeyboardButton("180s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_180"),
-             InlineKeyboardButton("240s", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_240"),
-             InlineKeyboardButton("⏭ Quiz default", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_skip")],
-        ])
-        await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n⏱ <b>Per-poll timer for this section?</b>", kb)
+        rows = [
+            [InlineKeyboardButton(label, callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_{seconds}") for seconds, label in row]
+            for row in TIMER_PRESET_ROWS
+        ]
+        rows.append([InlineKeyboardButton("⏭ Quiz default", callback_data=f"qs_sec_{chat_id}_{sec_idx}_sectm_skip")])
+        kb = InlineKeyboardMarkup(rows)
+        await _setup_edit(ctx, chat_id, f"✅ {mode_lbl} selected\n\n⏱ <b>Per-poll timer for this section?</b>\nChoose 10 seconds to 10 minutes.", kb)
 
 
 async def _show_sec_marks_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, sec_idx: int) -> None:
@@ -264,7 +255,7 @@ async def _show_sec_marks_prompt(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, s
     if sec_cfg.get("slot_minutes"):
         timer_lbl = f"{sec_cfg['slot_minutes']} min slot"
     elif sec_cfg.get("timer"):
-        timer_lbl = f"{sec_cfg['timer']}s per poll"
+        timer_lbl = f"{format_timer(sec_cfg['timer'])} per poll"
     else:
         timer_lbl = "quiz default timer"
     await _setup_edit(ctx, chat_id, f"✅ Timer: {timer_lbl}\n\n✅ <b>Correct mark for this section?</b>", kb)
@@ -372,8 +363,8 @@ async def quiz_setup_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                 await query.edit_message_text("✅ Timer: quiz default")
                 await _show_section_mode_prompt(ctx, chat_id)
             else:
-                ps["timer_override"] = int(value)
-                await query.edit_message_text(f"✅ Timer: {value}s")
+                ps["timer_override"] = validate_quiz_timer(value)
+                await query.edit_message_text(f"✅ Timer: {format_timer(ps['timer_override'])}")
                 await _show_section_mode_prompt(ctx, chat_id)
     except Exception as e:
         logger.error("quiz_setup_callback error: %s", e, exc_info=True)
@@ -404,7 +395,7 @@ async def _handle_sec_callback(query, ctx: ContextTypes.DEFAULT_TYPE, chat_id: i
         sec_cfg["slot_minutes"] = int(val)
         await _show_sec_marks_prompt(ctx, chat_id, sec_idx)
     elif substep == "sectm":
-        sec_cfg["timer"] = None if val == "skip" else int(val)
+        sec_cfg["timer"] = None if val == "skip" else validate_quiz_timer(val)
         await _show_sec_marks_prompt(ctx, chat_id, sec_idx)
     elif substep == "seccm":
         sec_cfg["correct_mark"] = None if val == "skip" else float(val)
@@ -486,7 +477,9 @@ async def _launch_quiz_from_settings(chat_id: int, ctx: ContextTypes.DEFAULT_TYP
         qset_id = quiz["question_set_id"]
 
         if ps.get("timer_override"):
-            quiz["timer"] = ps["timer_override"]
+            quiz["timer"] = validate_quiz_timer(ps["timer_override"])
+        else:
+            quiz["timer"] = clamp_quiz_timer(quiz.get("timer", 30))
         quiz["shuffle"] = ps.get("shuffle_q", False)
         quiz["shuffle_options"] = ps.get("shuffle_o", False)
         quiz["shuffle_options_count"] = ps.get("shuffle_o_count", 0)
@@ -569,12 +562,12 @@ async def _send_start_card(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: d
     card = f"🎯 <b>{quiz.get('quiz_name', 'Quiz')}</b>\n{'─' * 30}\n📋 <b>Questions:</b> {total_q}"
     if skip:
         card += f" <i>(starting from Q{skip + 1})</i>"
-    card += f"\n⏱ <b>Timer:</b> {timer}s per question"
+    card += f"\n⏱ <b>Timer:</b> {format_timer(timer)} per question"
     if sections:
         card += f"\n📂 <b>Sections:</b> {len(sections)}"
         for sec in sections:
             r = sec.get("question_range", (0, 0))
-            card += f"\n    • {sec.get('name', '?')} — Q{r[0]}–{r[1]} ({sec.get('timer', timer)}s)"
+            card += f"\n    • {sec.get('name', '?')} — Q{r[0]}–{r[1]} ({format_timer(sec.get('timer', timer))})"
     card += (
         f"\n✅ <b>Correct mark:</b> +{cm}\n➖ <b>Negative:</b> {neg_str}\n"
         f"🔀 <b>Shuffle Q:</b> {shuffle_q}  |  <b>Options:</b> {shuffle_o}\n"
