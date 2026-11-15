@@ -15,6 +15,10 @@ from quizbot.database import AuthChatRepository, BatchRepository, QuizRepository
 
 def shuffle_options(options: list[str], correct_id: int) -> tuple[list[str], int]:
     """Shuffle all options, remapping a single correct index."""
+    if not options:
+        raise ValueError("Cannot shuffle a question with no options")
+    if not 0 <= correct_id < len(options):
+        raise ValueError("Correct option index is outside the options list")
     paired = list(enumerate(options))
     random.shuffle(paired)
     indices, shuffled = zip(*paired)
@@ -36,6 +40,12 @@ def shuffle_options_multi(
                                       they were.
     """
     n = len(options)
+    if not options:
+        if correct_ids:
+            raise ValueError("Correct option indices supplied for an empty options list")
+        return [], []
+    if any(not isinstance(index, int) or index < 0 or index >= n for index in correct_ids):
+        raise ValueError("A correct option index is outside the options list")
     if count is None or count <= 0 or count >= n:
         paired = list(enumerate(options))
         random.shuffle(paired)
