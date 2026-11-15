@@ -2,6 +2,7 @@
 Advance Quiz Bot — Open Source Project
 This project was originally developed by Gagan (github.com/devgaganin).
 Reference: https://t.me/advance_quiz_bot
+The codebase has been reviewed and verified with the assistance of Claude AI.
 """
 
 from __future__ import annotations
@@ -10,32 +11,17 @@ from quizbot.database import UserRepository, get_db
 from quizbot.shared import config
 
 
-def _is_owner_or_admin(user_id: int) -> bool:
-    """Return whether *user_id* is configured as the bot owner or an admin.
-
-    Owner/admin access is a deployment-level privilege and must not depend on
-    a MongoDB premium subscription document being present.
-    """
-    return (
-        (config.OWNER_ID is not None and int(user_id) == config.OWNER_ID)
-        or int(user_id) in config.ADMIN_IDS
-    )
-
-
 async def is_premium_user(user_id: int) -> bool:
-    """Return whether a user can use premium-gated features.
-
-    Access is granted to all users when FREE_BOT is enabled, to the configured
-    owner/admin accounts, or to users with an active database subscription.
-    This makes the OWNER_ID / ADMIN_IDS settings consistently effective for
-    every premium-gated command (including /create, /myquizzes and /edit).
+    """Return True if the given Telegram user currently has an active premium
+    subscription. If FREE_BOT is enabled, every user is treated as premium.
     """
-    uid = int(user_id)
-    if config.FREE_BOT or _is_owner_or_admin(uid):
+    if config.FREE_BOT:
         return True
-
+    # Owner/admin access is independent of paid subscription records.
+    if user_id == config.OWNER_ID or user_id in config.ADMIN_IDS:
+        return True
     repo = UserRepository(get_db())
-    return await repo.is_premium(uid)
+    return await repo.is_premium(user_id)
 
 
 async def grant_premium(user_id: int, days: int | None = 30) -> None:
