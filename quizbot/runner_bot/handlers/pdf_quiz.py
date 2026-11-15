@@ -19,6 +19,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from quizbot.shared import config
+from quizbot.shared.timers import TIMER_PRESET_ROWS, validate_quiz_timer, format_timer
 from quizbot.shared.utils import is_premium_user
 from quizbot.shared.utils.async_files import remove_file, write_temp_file
 
@@ -257,9 +258,9 @@ async def pdfquiz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             from ..state import tasks
             tasks.spawn(_pdfquiz_generate_flow(uid, ctx, msg, sess), name=f"pdfquiz_gen_{uid}")
         elif step == "timer":
-            sess["timer"] = int(value)
+            sess["timer"] = validate_quiz_timer(value)
             await msg.edit_text(
-                f"✅ Timer: {value}s\n\n➖ Negative marking?",
+                f"✅ Timer: {format_timer(sess['timer'])}\n\n➖ Negative marking?",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("None", callback_data=f"pdfq_neg_{uid}_0"),
                      InlineKeyboardButton("1/4", callback_data=f"pdfq_neg_{uid}_0.25"),
@@ -431,8 +432,8 @@ async def _pdfquiz_generate_flow(uid: int, ctx: ContextTypes.DEFAULT_TYPE, msg: 
         PDF_QUIZ_SESSIONS[uid] = sess
 
         timer_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{t}s", callback_data=f"pdfq_timer_{uid}_{t}") for t in (10, 15, 20)],
-            [InlineKeyboardButton(f"{t}s", callback_data=f"pdfq_timer_{uid}_{t}") for t in (25, 30, 45)],
+            [InlineKeyboardButton(label, callback_data=f"pdfq_timer_{uid}_{seconds}") for seconds, label in row]
+            for row in TIMER_PRESET_ROWS
         ])
         await msg.edit_text(preview, parse_mode=ParseMode.HTML, reply_markup=timer_kb)
     except Exception as e:
