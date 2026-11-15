@@ -71,3 +71,55 @@ def test_timer_control_is_not_consumed_by_creator_wizards():
     assert '"timer"' in creation
     assert '"timer"' in editing
     assert "~filters.command(runner_commands)" in editing
+
+
+def test_leaderboard_saver_repository_methods_exist():
+    source = (ROOT / "quizbot/database/repositories.py").read_text(encoding="utf-8")
+    assert "async def record_attempt(" in source
+    assert "async def upsert_entry(" in source
+
+
+def test_quiz_score_saver_uses_real_repository_methods():
+    source = (ROOT / "quizbot/runner_bot/handlers/quiz_play.py").read_text(encoding="utf-8")
+    assert "await attempt_repo.record_attempt(" in source
+    assert "await lb_repo.upsert_entry(" in source
+    assert "await mistake_repo.record(uid, mistakes)" in source
+    assert "await qstats_repo.bulk_update_wrong_stats" in source
+
+
+def test_long_passages_use_chunked_plain_text_delivery():
+    source = (ROOT / "quizbot/runner_bot/handlers/quiz_play.py").read_text(encoding="utf-8")
+    utils = (ROOT / "quizbot/runner_bot/telegram_utils.py").read_text(encoding="utf-8")
+    assert "safe_send_long_message(ctx, chat_id, overflow" in source
+    assert "from quizbot.shared.text_limits import split_telegram_text" in utils
+
+
+def test_topic_thread_id_alias_is_normalized_for_ptb():
+    source = (ROOT / "quizbot/runner_bot/telegram_utils.py").read_text(encoding="utf-8")
+    assert 'explicit_thread_id = kwargs.pop("thread_id", None)' in source
+    assert 'kwargs["message_thread_id"] = explicit_thread_id' in source
+
+
+def test_topic_helper_accepts_update_objects_and_message_ids():
+    source = (ROOT / "quizbot/runner_bot/telegram_utils.py").read_text(encoding="utf-8")
+    assert "def _get_topic_thread_id(value: Any)" in source
+    assert "effective_message" in source
+    assert "message_thread_id" in source
+
+
+def test_pollquiz_has_non_anonymous_answer_tracking_and_finalization():
+    state = (ROOT / "quizbot/runner_bot/state.py").read_text(encoding="utf-8")
+    poll_quiz = (ROOT / "quizbot/runner_bot/handlers/poll_quiz.py").read_text(encoding="utf-8")
+    player = (ROOT / "quizbot/runner_bot/handlers/quiz_play.py").read_text(encoding="utf-8")
+    assert "pollquiz_sessions" in state
+    assert "handle_pollquiz_poll_answer" in player
+    assert "pollquiz_score_rows" in player
+    assert "finalize_pollquiz" in poll_quiz
+    assert "is_anonymous=is_anonymous" in poll_quiz
+    assert "run /pollstop" in poll_quiz.lower()
+
+
+def test_pollquiz_scores_use_real_repository_save_path():
+    source = (ROOT / "quizbot/runner_bot/handlers/poll_quiz.py").read_text(encoding="utf-8")
+    assert "_record_attempt_and_report(" in source
+    assert "stop_poll" in source
