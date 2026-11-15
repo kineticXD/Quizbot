@@ -46,8 +46,26 @@ def _env_int_list(key: str) -> list[int]:
 API_ID: int | None = _env_int("API_ID")
 API_HASH: str | None = _env("API_HASH")
 
-CREATOR_BOT_TOKEN: str | None = _env("CREATOR_BOT_TOKEN")
-RUNNER_BOT_TOKEN: str | None = _env("RUNNER_BOT_TOKEN")
+# One BotFather token is enough for the unified bot. Internally, the project
+# keeps two protocol adapters: Kurigram/MTProto for creator operations and
+# python-telegram-bot/Bot API for quiz delivery. The legacy variables remain
+# accepted so existing deployments can migrate without losing access.
+BOT_TOKEN: str | None = _env("BOT_TOKEN")
+_LEGACY_CREATOR_BOT_TOKEN: str | None = _env("CREATOR_BOT_TOKEN")
+_LEGACY_RUNNER_BOT_TOKEN: str | None = _env("RUNNER_BOT_TOKEN")
+
+if BOT_TOKEN:
+    CREATOR_BOT_TOKEN: str | None = BOT_TOKEN
+    RUNNER_BOT_TOKEN: str | None = BOT_TOKEN
+else:
+    # Backward compatibility: a single legacy token is reused by both sides;
+    # two old, different tokens continue to work until the owner migrates.
+    CREATOR_BOT_TOKEN = _LEGACY_CREATOR_BOT_TOKEN or _LEGACY_RUNNER_BOT_TOKEN
+    RUNNER_BOT_TOKEN = _LEGACY_RUNNER_BOT_TOKEN or _LEGACY_CREATOR_BOT_TOKEN
+
+BOT_TOKENS: tuple[str, ...] = tuple(
+    dict.fromkeys(token for token in (CREATOR_BOT_TOKEN, RUNNER_BOT_TOKEN) if token)
+)
 
 # ---------------------------------------------------------------------------
 # Database (MongoDB Atlas -- a hosted database reachable over the network,
@@ -178,26 +196,33 @@ for _d in (DATA_DIR, CACHE_DIR, TEMP_DIR):
 
 
 def validate(bot: str = "both") -> list[str]:
-    """Return a list of human-readable problems with the current config.
+    """Return actionable configuration errors.
 
-    `bot` may be 'creator', 'runner', 'miniapp', or 'both' to scope which
-    token is required.
+    ``bot`` may be ``creator``, ``runner``, ``miniapp`` or ``both``. A new
+    installation only needs BOT_TOKEN. The legacy per-adapter token names
+    are supported for backwards compatibility.
     """
-    problems = []
+    problems: list[str] = []
     if not MONGODB_URI:
-        problems.append("MONGODB_URI is not set (get a free connection string from https://cloud.mongodb.com)")
+        problems.append(
+            "MONGODB_URI is not set (get a MongoDB Atlas connection string from https://cloud.mongodb.com)"
+        )
+
     if bot == "miniapp":
-        # The Mini App only needs to verify initData signed by whichever bot
-        # opened it, so at least one token is enough (not both).
-        if not CREATOR_BOT_TOKEN and not RUNNER_BOT_TOKEN:
-            problems.append("CREATOR_BOT_TOKEN or RUNNER_BOT_TOKEN must be set (Mini App verifies initData against one of them)")
+        if not BOT_TOKENS:
+            problems.append("BOT_TOKEN is not set (the Mini App needs the bot token to verify Telegram initData)")
         return problems
-    if not API_ID or not API_HASH:
-        problems.append("API_ID / API_HASH are required (get them from my.telegram.org)")
-    if bot in ("creator", "both") and not CREATOR_BOT_TOKEN:
-        problems.append("CREATOR_BOT_TOKEN is not set")
+
+    if bot in ("creator", "both"):
+        if not API_ID or not API_HASH:
+            problems.append("API_ID / API_HASH are required by the creator adapter (get them from https://my.telegram.org)")
+        if not CREATOR_BOT_TOKEN:
+            problems.append("BOT_TOKEN is not set (or provide the legacy CREATOR_BOT_TOKEN)")
+
     if bot in ("runner", "both") and not RUNNER_BOT_TOKEN:
-        problems.append("RUNNER_BOT_TOKEN is not set")
+        problems.append("BOT_TOKEN is not set (or provide the legacy RUNNER_BOT_TOKEN)")
+
     if not OWNER_ID:
-        problems.append("OWNER_ID is not set (owner-only commands will be unreachable)")
+        problems.append("OWNER_ID is not set (owner-only commands will be unavailable)")
+
     return problems
