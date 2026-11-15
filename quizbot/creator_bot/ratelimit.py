@@ -13,6 +13,7 @@ from typing import Awaitable, Callable
 
 from pyrogram.types import Message
 
+from quizbot.shared import config
 from . import state
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,9 @@ def ratelimit(bucket: str = "default") -> Callable[[Handler], Handler]:
         async def wrapper(client, message: Message, *args, **kwargs):
             user = message.from_user
             if user is None:
+                return await fn(client, message, *args, **kwargs)
+            # Owner and configured admins are exempt from every creator bucket.
+            if user.id == config.OWNER_ID or user.id in config.ADMIN_IDS:
                 return await fn(client, message, *args, **kwargs)
             wait_minutes = state.check_rate_limit(user.id, bucket)
             if wait_minutes is None:
