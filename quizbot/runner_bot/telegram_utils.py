@@ -16,6 +16,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, 
 from telegram.ext import ContextTypes
 
 from .state import pending_quiz_settings, session_mgr
+from quizbot.shared.text_limits import split_telegram_text
 
 logger = logging.getLogger(__name__)
 
@@ -45,22 +46,65 @@ async def send_raw_api(ctx: ContextTypes.DEFAULT_TYPE, method: str, params: dict
     return await ctx.bot.do_api_request(method, api_kwargs=params)
 
 
-def _get_topic_thread_id(chat_id: int) -> Optional[int]:
-    """Return message_thread_id for chat_id from the active session or a
-    pending setup wizard, or None."""
-    s = session_mgr.get(chat_id)
-    if s and s.get("message_thread_id"):
-        return s["message_thread_id"]
-    ps = pending_quiz_settings.get(chat_id)
-    if ps and ps.get("message_thread_id"):
-        return ps["message_thread_id"]
+def _get_topic_thread_id(value: Any) -> Optional[int]:
+    """Resolve a forum topic ID from a chat ID, Update, Message or session.
+
+    Older call sites passed the Telegram Update object while newer ones pass
+    an integer chat ID. Accept both shapes so group quiz polls and final
+    leaderboard messages stay inside the topic where the quiz was launched.
+    """
+    chat_id: Optional[int] = None
+    if isinstance(value, int):
+        chat_id = value
+    else:
+        message = getattr(value, "effective_message", None) or getattr(value, "message", None)
+        if message is None and hasattr(value, "message_thread_id"):
+            message = value
+        thread_id = getattr(message, "message_thread_id", None) if message is not None else None
+        if thread_id:
+            return thread_id
+        chat = getattr(value, "effective_chat", None) or getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None) if chat is not None else None
+    if chat_id is None:
+        return None
+    session = session_mgr.get(chat_id)
+    if session and session.get("message_thread_id"):
+        return session["message_thread_id"]
+    pending = pending_quiz_settings.get(chat_id)
+    if pending and pending.get("message_thread_id"):
+        return pending["message_thread_id"]
     return None
+
+
+async def safe_send_long_message(
+    ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, *, thread_id: Optional[int] = None
+) -> list[Any]:
+    """Send long plain-text passages/explanations in safe Telegram-sized chunks.
+
+    Callers pass plain text deliberately. This preserves literal angle
+    brackets, math notation and source passages instead of treating user text
+    as Telegram HTML. Every part is <= 3900 UTF-16 code units.
+    """
+    if not text:
+        return []
+    sent: list[Any] = []
+    for chunk in split_telegram_text(text):
+        kwargs = {"thread_id": thread_id} if thread_id else {}
+        message = await safe_send_message(ctx, chat_id, chunk, **kwargs)
+        if message is not None:
+            sent.append(message)
+    return sent
 
 
 async def safe_send_message(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, **kwargs: Any
 ) -> Optional[Any]:
     """Send a message with retry on flood-control/timeout/network errors."""
+    # Internal call sites use the shorter `thread_id`; python-telegram-bot's
+    # Bot API wrapper expects `message_thread_id`.
+    explicit_thread_id = kwargs.pop("thread_id", None)
+    if explicit_thread_id and "message_thread_id" not in kwargs:
+        kwargs["message_thread_id"] = explicit_thread_id
     if "message_thread_id" not in kwargs:
         tid = _get_topic_thread_id(chat_id)
         if tid:
@@ -92,6 +136,9 @@ async def safe_send_poll(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, question: str, options: list[str], **kwargs: Any
 ) -> Optional[Any]:
     """Send a poll with retry on flood-control/timeout/network errors."""
+    explicit_thread_id = kwargs.pop("thread_id", None)
+    if explicit_thread_id and "message_thread_id" not in kwargs:
+        kwargs["message_thread_id"] = explicit_thread_id
     if "message_thread_id" not in kwargs:
         tid = _get_topic_thread_id(chat_id)
         if tid:
@@ -123,10 +170,24 @@ async def safe_send_poll(
     return None
 
 
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
+    """Truncate by UTF-16 code units, which is conservative for Bot API limits."""
+    if _utf16_length(text) <= limit:
         return text
-    return text[: limit - 3].rstrip() + "..."
+    target = max(0, limit - 3)
+    units = 0
+    end = 0
+    for index, char in enumerate(text):
+        size = 2 if ord(char) > 0xFFFF else 1
+        if units + size > target:
+            break
+        units += size
+        end = index + 1
+    return text[:end].rstrip() + "..."
 
 
 def prepare_poll_data(
@@ -166,8 +227,8 @@ def prepare_poll_data(
 
     full_question = f"{prefix}{poll_stem}"
 
-    question_too_long = len(full_question) > QUESTION_SOFT_LIMIT
-    any_option_long = any(len(opt) > OPTION_SOFT_LIMIT for opt in options)
+    question_too_long = _utf16_length(full_question) > QUESTION_SOFT_LIMIT
+    any_option_long = any(_utf16_length(opt) > OPTION_SOFT_LIMIT for opt in options)
     needs_overflow = is_multiline or question_too_long or any_option_long
 
     if question_too_long or is_multiline:
@@ -185,7 +246,7 @@ def prepare_poll_data(
     poll_explanation = None
     if explanation:
         poll_explanation = (
-            _truncate(explanation, EXPLANATION_TRIM) if len(explanation) > TG_EXPLANATION_MAX else explanation
+            _truncate(explanation, EXPLANATION_TRIM) if _utf16_length(explanation) > TG_EXPLANATION_MAX else explanation
         )
 
     desc_parts: list[str] = []
@@ -203,14 +264,14 @@ def prepare_poll_data(
 
     description_text = "".join(desc_parts)
 
-    if len(description_text) <= TG_DESCRIPTION_MAX:
+    if _utf16_length(description_text) <= TG_DESCRIPTION_MAX:
         return poll_question, poll_options, poll_explanation, None, description_text
 
-    overflow_parts = [f"\U0001F4CB <b>Q{question_index + 1}/{total_questions}</b>", f"\n\n{full_body}"]
+    overflow_parts = [f"📋 Q{question_index + 1}/{total_questions}", f"\n\n{full_body}"]
     if reply_text:
         overflow_parts.append(f"\n\n\U0001F4DD {reply_text}")
     if any_option_long:
-        overflow_parts.append("\n\n\U0001F524 <b>Options:</b>")
+        overflow_parts.append("\n\n🔤 Options:")
         for i, opt in enumerate(options):
-            overflow_parts.append(f"\n  <b>{chr(65 + i)})</b> {opt}")
+            overflow_parts.append(f"\n  {chr(65 + i)}) {opt}")
     return poll_question, poll_options, poll_explanation, "".join(overflow_parts), None
