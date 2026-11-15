@@ -26,7 +26,7 @@ from quizbot.shared.utils import is_premium_user
 from quizbot.shared.timers import validate_quiz_timer
 
 from .. import state
-from ..parsing import filter_words, parse_question_block, strip_source_noise
+from ..parsing import filter_words, parse_question_block, split_question_blocks, strip_source_noise
 from ..ratelimit import ratelimit
 from ..subscribe_gate import subscribe_gate
 from .file_import import process_uploaded_file
@@ -541,7 +541,7 @@ async def handle_creation_message(c: Client, m: Message) -> None:
         return
 
     # ── Free-text question paste ──────────────────────────────────────
-    blocks = m.text.split("\n\n")
+    blocks = split_question_blocks(m.text)
     reply_msg = m.reply_to_message
     reply_text = reply_msg.text if reply_msg and reply_msg.text else None
     file_id = None
