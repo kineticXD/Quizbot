@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -17,6 +18,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from quizbot.database import AuthChatRepository, QuizRepository, get_db
+from quizbot.shared import config
 from quizbot.shared.rich_quiz import RichDispatchResult, enrich_question_dispatch
 from quizbot.shared.utils import is_premium_user
 
@@ -33,14 +35,58 @@ from ..telegram_utils import (
 logger = logging.getLogger(__name__)
 
 _ANON_ADMIN_ID = 1087968824
+# Telegram Bot API permits poll auto-close durations from 5 seconds to 30 days.
+MIN_POLL_OPEN_SECONDS = 5
+MAX_POLL_OPEN_SECONDS = 2_628_000
+MAX_POLLQUIZ_MINUTES = MAX_POLL_OPEN_SECONDS // 60
+
+
+def _resolve_auto_close_seconds(
+    value: Optional[int] = None, total: int = 1, poll_delay: float = 4.0,
+) -> int:
+    """Validate duration and reserve Telegram's close-period buffer for early polls."""
+    seconds = config.POLLQUIZ_AUTO_CLOSE_SECONDS if value is None else int(value)
+    if not MIN_POLL_OPEN_SECONDS <= seconds <= MAX_POLL_OPEN_SECONDS:
+        raise ValueError(
+            f"Poll quiz duration must be between {MIN_POLL_OPEN_SECONDS} seconds "
+            f"and {MAX_POLL_OPEN_SECONDS} seconds (30 days)."
+        )
+    max_buffer = math.ceil(max(0, total - 1) * (poll_delay + 15.0) + 5.0)
+    seconds = min(seconds, MAX_POLL_OPEN_SECONDS - max_buffer)
+    if seconds < MIN_POLL_OPEN_SECONDS:
+        raise ValueError("This quiz has too many questions for Telegram's maximum poll duration.")
+    return seconds
+
+
+def _poll_open_period(
+    auto_close_seconds: int, total: int, poll_delay: float, question_index: int,
+) -> int:
+    """Align each question's expiry to the last poll's auto-close deadline."""
+    remaining = max(0, total - question_index - 1)
+    posting_buffer = math.ceil(remaining * (poll_delay + 15.0) + 5.0)
+    return min(MAX_POLL_OPEN_SECONDS, auto_close_seconds + posting_buffer)
+
+
+def _format_duration(seconds: int) -> str:
+    minutes, remainder = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if minutes:
+        parts.append(f"{minutes} minute" + ("s" if minutes != 1 else ""))
+    if remainder and not hours:
+        parts.append(f"{remainder} second" + ("s" if remainder != 1 else ""))
+    return " ".join(parts) or "less than a minute"
 
 
 async def _pollquiz_send_one(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, q: dict, idx: int, total: int,
     do_shuffle: bool, is_anonymous: bool = True, shuffle_count: int = 0,
     score_session: Optional[dict] = None, thread_id: Optional[int] = None,
+    poll_open_period: Optional[int] = None,
 ) -> bool:
-    """Send one question as a never-expiring poll. Returns True on success.
+    """Send one question as an auto-closing poll. Returns True on success.
     Applies the same rich-text pre-pass as the timed group/private senders:
     a rich question/options/reply_text is pre-sent via sendRichMessage
     before the poll goes out (see `quizbot.shared.rich_quiz`)."""
@@ -94,6 +140,8 @@ async def _pollquiz_send_one(
             poll_kwargs["correct_option_id"] = correct_ids[0]
         if poll_desc:
             poll_kwargs["description"] = poll_desc
+        if poll_open_period is not None:
+            poll_kwargs["open_period"] = int(poll_open_period)
 
         sent = await safe_send_poll(
             ctx, chat_id, question=poll_q, options=poll_opts, type=Poll.QUIZ,
@@ -115,10 +163,9 @@ async def _pollquiz_send_one(
 
 async def run_channel_pollquiz(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: dict, is_anonymous: bool = True,
-    thread_id: Optional[int] = None,
+    thread_id: Optional[int] = None, auto_close_seconds: Optional[int] = None,
 ) -> None:
-    """Post every question as a non-expiring poll. In groups, answers are
-    tracked per participant and can be ranked with /leaderboard.
+    """Post questions as auto-closing polls and automatically publish group rankings.
 
     Telegram never exposes voter identities for anonymous channel polls, so
     channel mode deliberately has no individual leaderboard.
@@ -130,6 +177,7 @@ async def run_channel_pollquiz(
         do_shuffle = quiz.get("shuffle_options", False)
         shuffle_o_count = quiz.get("shuffle_options_count", 0)
         poll_delay = 3.5 if total <= 20 else 4.0 if total <= 50 else 5.0
+        auto_close_seconds = _resolve_auto_close_seconds(auto_close_seconds, total, poll_delay)
 
         if not is_anonymous:
             score_session = {
@@ -141,7 +189,9 @@ async def run_channel_pollquiz(
                 "polls": {},
                 "participants": {},
                 "started_at": time.time(),
+                "auto_close_seconds": auto_close_seconds,
                 "posting_complete": False,
+                "finalizing": False,
                 "finalized": False,
                 "message_thread_id": thread_id,
             }
@@ -154,9 +204,9 @@ async def run_channel_pollquiz(
         await safe_send_message(
             ctx, chat_id,
             f"📣 <b>{quiz.get('quiz_name', 'Quiz')}</b>\n"
-            f"❓ {total} questions • ♾️ No timer — answer at your own pace!"
-            + ("\n\nUse /leaderboard to see live group scores. Use /pollstop when everyone has finished to close polls and save the final leaderboard."
-               if score_session is not None else "\n\nIndividual scores are unavailable for anonymous channel polls."),
+            f"❓ {total} questions • ⏳ Polls close automatically after {_format_duration(auto_close_seconds)}."
+            + ("\n\nThe final group leaderboard will be posted automatically when the quiz ends. /leaderboard shows a live snapshot; /pollstop remains available for an early manual finish."
+               if score_session is not None else "\n\nThese channel polls are anonymous, so Telegram does not provide individual scores or a personal leaderboard."),
             parse_mode=ParseMode.HTML, thread_id=thread_id,
         )
         await asyncio.sleep(1.5)
@@ -168,6 +218,7 @@ async def run_channel_pollquiz(
                 ctx, chat_id, q, idx, total, do_shuffle,
                 is_anonymous=is_anonymous, shuffle_count=shuffle_o_count,
                 score_session=score_session, thread_id=thread_id,
+                poll_open_period=_poll_open_period(auto_close_seconds, total, poll_delay, idx),
             )
             await asyncio.sleep(poll_delay if sent else poll_delay + 2.0)
 
@@ -175,30 +226,36 @@ async def run_channel_pollquiz(
             score_session["posting_complete"] = True
             await safe_send_message(
                 ctx, chat_id,
-                "✅ All quiz polls have been posted. Participants can continue answering at their own pace. "
-                "Use /leaderboard for a live snapshot; use /pollstop after everyone finishes to close polls and save scores.",
+                f"✅ All {total} questions are posted. The polls will close automatically in "
+                f"{_format_duration(auto_close_seconds)}; the final leaderboard will then appear here.",
                 thread_id=thread_id,
             )
+            # Each Telegram poll has an open_period. The extra posting buffer
+            # ensures even the first poll remains open until this final window
+            # (measured from the last question) has elapsed.
+            await asyncio.sleep(auto_close_seconds + 7)
+            if pollquiz_sessions.get(chat_id) is score_session and not score_session.get("finalized"):
+                logger.info("Auto-finalizing poll quiz for chat=%s", chat_id)
+                await finalize_pollquiz(ctx, chat_id)
         else:
-            score_options = [str(i) for i in range(total + 1)]
-            if len(score_options) <= 10:
-                await ctx.bot.send_poll(
-                    chat_id=chat_id, question=f"✅ Quiz done! How many did you get correct? (out of {total})",
-                    options=score_options, is_anonymous=True, allows_multiple_answers=False,
-                    message_thread_id=thread_id,
-                )
-            else:
-                for start_idx in range(0, len(score_options), 10):
-                    chunk = score_options[start_idx:start_idx + 10]
-                    label = f"{start_idx}–{start_idx + len(chunk) - 1}"
-                    await ctx.bot.send_poll(
-                        chat_id=chat_id, question=f"✅ Score check ({label} correct out of {total})?",
-                        options=chunk, is_anonymous=True, allows_multiple_answers=False,
-                        message_thread_id=thread_id,
-                    )
-                    await asyncio.sleep(1)
+            # Channel polls are anonymous by Telegram design. They still close
+            # automatically, but no individual ranking can be calculated.
+            await safe_send_message(
+                ctx, chat_id,
+                f"✅ All {total} anonymous channel polls are posted. They will close automatically in "
+                f"{_format_duration(auto_close_seconds)}.",
+                thread_id=thread_id,
+            )
+            await asyncio.sleep(auto_close_seconds + 7)
+            await safe_send_message(
+                ctx, chat_id,
+                "🏁 <b>Quiz ended.</b> All poll questions are now closed. "
+                "Individual leaderboard scores are unavailable for anonymous channel polls.",
+                parse_mode=ParseMode.HTML, thread_id=thread_id,
+            )
     except asyncio.CancelledError:
-        await safe_send_message(ctx, chat_id, "🛑 Poll quiz posting stopped.", thread_id=thread_id)
+        if score_session is None or not score_session.get("posting_complete"):
+            await safe_send_message(ctx, chat_id, "🛑 Poll quiz posting stopped.", thread_id=thread_id)
         raise
     except Exception as e:
         logger.error("run_channel_pollquiz error: %s", e, exc_info=True)
@@ -274,6 +331,9 @@ async def finalize_pollquiz(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> boo
     thread_id = session.get("message_thread_id")
     if session.get("finalized"):
         return True
+    if session.get("finalizing"):
+        return False
+    session["finalizing"] = True
 
     for poll in session.get("polls", {}).values():
         message_id = poll.get("message_id")
@@ -302,6 +362,7 @@ async def finalize_pollquiz(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> boo
             logger.exception("Unable to persist /pollquiz leaderboard for chat=%s", chat_id)
             persisted = False
     session["finalized"] = bool(persisted)
+    session["finalizing"] = False
     return bool(persisted)
 
 
@@ -329,8 +390,7 @@ async def _send_pollquiz_scoreboard(
 
 
 async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/pollquiz QUIZID` -- runs in a group/supergroup (or as a direct
-    command in a channel that allows bot commands)."""
+    """`/pollquiz QUIZID [minutes]` -- auto-closes polls and publishes group scores."""
     chat_id = update.message.chat_id
     try:
         chat_type = update.message.chat.type
@@ -341,8 +401,28 @@ async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-        if not ctx.args:
-            await safe_send_message(ctx, chat_id, "Usage: /pollquiz QUIZID")
+        if not ctx.args or len(ctx.args) > 2:
+            await safe_send_message(
+                ctx, chat_id,
+                "Usage: /pollquiz QUIZ_ID [minutes]\nDefault duration: 60 minutes. "
+                "The final leaderboard is posted automatically when polls close.",
+            )
+            return
+
+        try:
+            if len(ctx.args) == 2:
+                duration_minutes = int(ctx.args[1])
+                if not 1 <= duration_minutes <= MAX_POLLQUIZ_MINUTES:
+                    raise ValueError
+                duration_seconds = duration_minutes * 60
+            else:
+                duration_seconds = _resolve_auto_close_seconds()
+        except (TypeError, ValueError):
+            await safe_send_message(
+                ctx, chat_id,
+                f"Duration must be 1–{MAX_POLLQUIZ_MINUTES} minutes. "
+                "Example: /pollquiz QUIZ_ID 60",
+            )
             return
 
         if user_id and user_id != _ANON_ADMIN_ID and not await is_premium_user(user_id):
@@ -373,7 +453,10 @@ async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYP
         is_anon = chat_type == "channel"
         thread_id = getattr(update.effective_message, "message_thread_id", None)
         task = asyncio.create_task(
-            run_channel_pollquiz(ctx, chat_id, quiz, is_anonymous=is_anon, thread_id=thread_id)
+            run_channel_pollquiz(
+                ctx, chat_id, quiz, is_anonymous=is_anon, thread_id=thread_id,
+                auto_close_seconds=duration_seconds,
+            )
         )
         channel_poll_tasks[chat_id] = task
     except Exception as e:
