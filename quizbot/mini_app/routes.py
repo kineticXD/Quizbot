@@ -70,12 +70,8 @@ def _clamp_optional_float(value: Optional[float], lo: float, hi: float) -> Optio
 
 
 def _require_bot_token() -> str:
-    # Whichever bot's token the Mini App is registered under -- both bots
-    # can point their WebApp buttons at the same Mini App, and initData is
-    # always signed with the token of the bot that opened it, so either
-    # CREATOR_BOT_TOKEN or RUNNER_BOT_TOKEN verifies correctly as long as
-    # both are set. We try both and accept the first that verifies.
-    return config.CREATOR_BOT_TOKEN or config.RUNNER_BOT_TOKEN or ""
+    """Return the unified bot token (or a legacy migration token)."""
+    return config.BOT_TOKEN or config.CREATOR_BOT_TOKEN or config.RUNNER_BOT_TOKEN or ""
 
 
 async def _authenticate(x_telegram_init_data: Optional[str]) -> tuple[int, str]:
@@ -85,9 +81,7 @@ async def _authenticate(x_telegram_init_data: Optional[str]) -> tuple[int, str]:
     if not x_telegram_init_data:
         raise HTTPException(status_code=401)
 
-    for token in (config.CREATOR_BOT_TOKEN, config.RUNNER_BOT_TOKEN):
-        if not token:
-            continue
+    for token in config.BOT_TOKENS:
         session = verify_init_data(x_telegram_init_data, token)
         if session:
             user = session.user
