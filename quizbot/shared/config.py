@@ -160,6 +160,9 @@ SESSION_CLEANUP_INTERVAL: int = _env_int("SESSION_CLEANUP_INTERVAL", 600)
 # many seconds (and wrong) count toward the anti-cheat flag.
 CHEAT_SPEED_THRESHOLD: float = float(_env("CHEAT_SPEED_THRESHOLD", "3.0"))
 WATCHDOG_INTERVAL: int = _env_int("WATCHDOG_INTERVAL", 300)
+# Poll-quiz questions auto-close; the final leaderboard is published automatically.
+# Default: 60 minutes. Per-quiz `/pollquiz ID MINUTES` overrides this value.
+POLLQUIZ_AUTO_CLOSE_SECONDS: int = _env_int("POLLQUIZ_AUTO_CLOSE_SECONDS", 3600)
 
 # Creator Bot's three named rate-limit buckets (hits, window_seconds).
 # Defaults match the original adv2.py's hardcoded RATE_LIMITS exactly:
