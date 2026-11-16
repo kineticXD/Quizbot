@@ -29,6 +29,7 @@ from quizbot.database import (
     get_db,
 )
 from quizbot.shared import config
+from quizbot.shared.leaderboard_format import format_leaderboard_markdown, format_leaderboard_plain
 from quizbot.shared.timers import clamp_quiz_timer, format_timer, validate_quiz_timer
 from quizbot.shared.html.quiz_report import render_quiz_html
 from quizbot.shared.mini_app_link import mini_app_web_app_button_ptb
@@ -69,6 +70,52 @@ MID_QUIZ_LB_INTERVAL = 10
 # Anti-cheat pattern-detection tuning
 CHEAT_CHECK_EVERY = 10
 CHEAT_WRONG_RATIO = 0.5
+
+
+async def _send_leaderboard_table(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    title: str,
+    rows: list[dict],
+    *,
+    total_questions: int = 0,
+    status: str = "Final Results",
+    subtitle: Optional[str] = None,
+    thread_id: Optional[int] = None,
+    limit: int = 20,
+) -> bool:
+    """Publish a rich Telegram leaderboard table with a readable fallback.
+
+    Uses the same sendRichMessage Markdown-table route as the Creator Bot's
+    leaderboard. Telegram clients render it as a real table/card rather than
+    the old plain list. If rich messages are unavailable, send an accessible
+    text fallback with accuracy and timing intact.
+    """
+    rich_text = format_leaderboard_markdown(
+        title, rows, total_questions=total_questions, status=status,
+        subtitle=subtitle, limit=limit,
+    )
+    plain_text = format_leaderboard_plain(
+        title, rows, total_questions=total_questions, status=status, limit=limit,
+    )
+    fallback_state = {"sent": False}
+
+    async def _plain_fallback(_text: str):
+        message = await safe_send_message(
+            ctx, chat_id, plain_text, thread_id=thread_id,
+        )
+        fallback_state["sent"] = message is not None
+        return message
+
+    rich_ok = await send_rich_or_fallback(
+        lambda method, params: send_raw_api(ctx, method, params),
+        _plain_fallback,
+        chat_id,
+        rich_text,
+        thread_id=thread_id,
+        plain_limit=3500,
+    )
+    return bool(rich_ok or fallback_state["sent"])
 
 
 def _is_anon_admin(message) -> bool:
@@ -805,24 +852,33 @@ async def _send_mid_quiz_leaderboard(
 
     for uid, pdata in parts.items():
         corr = wrng = 0
+        total_time = 0.0
         for pid, pinfo in s.get("polls", {}).items():
-            if pid in pdata.get("answers", {}):
-                ans = pdata["answers"][pid]
-                if is_correct(ans["option"], pinfo["correct_option"]):
-                    corr += 1
-                else:
-                    wrng += 1
+            ans = pdata.get("answers", {}).get(pid)
+            if not ans:
+                continue
+            total_time += max(
+                0.0,
+                float(ans.get("time", 0) or 0) - float(pinfo.get("sent_time", 0) or 0),
+            )
+            if is_correct(ans.get("option", []), pinfo.get("correct_option", [])):
+                corr += 1
+            else:
+                wrng += 1
         score = (corr * correct_mark) - (wrng * neg)
-        rankings.append((pdata.get("name", "User"), corr, wrng, score))
+        rankings.append((pdata.get("name", "User"), corr, wrng, score, total_time))
 
-    rankings.sort(key=lambda r: r[3], reverse=True)
-    top = rankings[:5]
-
-    lines = [f"📊 <b>Mid-Quiz Leaderboard</b> ({current_q}/{total_q})\n"]
-    for i, (name, c, w, sc) in enumerate(top, 1):
-        lines.append(f"{i}. <b>{escape(str(name))}</b> — {sc:.1f} pts ({c}✅ {w}❌)")
-
-    await safe_send_message(ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id)
+    rankings.sort(key=lambda r: (r[3], -r[4]), reverse=True)
+    rows = [
+        {"name": name, "correct": correct, "wrong": wrong, "score": score, "total_time": total_time}
+        for name, correct, wrong, score, total_time in rankings
+    ]
+    await _send_leaderboard_table(
+        ctx, chat_id, "Quiz Standings", rows,
+        total_questions=total_q, status=f"Live · Question {current_q}/{total_q}",
+        subtitle=f"Live standings · {current_q} of {total_q} questions posted",
+        thread_id=thread_id, limit=5,
+    )
 
 
 async def handle_group_poll_answer(poll_id: str, user_id: int, option_ids: list, current_time: float, user_name: str) -> None:
@@ -920,39 +976,30 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
 
         quiz_name = quiz_data.get("quiz_name", "Unnamed Quiz")
         board_label = "Partial Leaderboard" if ended_early else "Final Leaderboard"
-        lines = [
-            f"🏆 <b>{board_label} — {escape(str(quiz_name))}</b>",
-            f"📊 Total Questions: {total}\n",
-        ]
-        for rank, user in enumerate(user_summary[:20], 1):
-            medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"{rank}."
-            minutes, seconds = divmod(int(user["total_time"]), 60)
-            answered = user["correct"] + user["wrong"]
-            lines.append(
-                f"{medal} <b>{escape(str(user['name']))}</b>: {user['score']:.2f} pts "
-                f"({user['correct']}✅ {user['wrong']}❌; {answered}/{total} answered) "
-                f"in {minutes}m {seconds}s"
-            )
-
-        if not user_summary:
-            lines.append(
-                "No participant answers were received. Make sure the quiz uses "
-                "non-anonymous polls and that the runner receives poll_answer updates."
-            )
-        elif len(user_summary) > 20:
-            lines.append(f"\n...and {len(user_summary) - 20} more participants.")
-
         quiz_ref = quiz_data.get("question_set_id") or quiz_data.get("qid") or s.get("quiz_id")
-        if quiz_ref:
-            lines.append(f"\nSaved results can be reopened with /leaderboard {escape(str(quiz_ref))}.")
-
         if not s.get("leaderboard_message_sent"):
-            sent_message = await safe_send_message(
-                ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id,
+            sent = await _send_leaderboard_table(
+                ctx, chat_id, str(quiz_name), user_summary,
+                total_questions=total,
+                status="Partial Results" if ended_early else "Final Results",
+                subtitle=(
+                    f"{board_label} · {total} questions · "
+                    f"{len(user_summary)} participants"
+                ),
+                thread_id=thread_id,
+                limit=20,
             )
-            if sent_message is None:
-                raise RuntimeError("Telegram did not confirm delivery of the final leaderboard")
+            if not sent:
+                # The rich sender has already attempted its plain fallback. A
+                # False result means Telegram did not confirm any delivery.
+                raise RuntimeError("Telegram did not confirm delivery of the leaderboard")
             s["leaderboard_message_sent"] = True
+            if quiz_ref:
+                await safe_send_message(
+                    ctx, chat_id,
+                    f"📌 Saved results can be reopened with /leaderboard {escape(str(quiz_ref))}.",
+                    thread_id=thread_id,
+                )
 
         if user_summary and not s.get("leaderboard_persisted"):
             quiz_data_for_report = dict(quiz_data)
@@ -1316,12 +1363,11 @@ async def normal_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show a rich leaderboard for the active or a previously saved quiz."""
     chat = update.effective_chat
     if not chat:
         return
 
-    # Prefer the currently active timed quiz over a previously completed
-    # non-expiring /pollquiz snapshot in the same chat.
     session = session_mgr.get(chat.id)
     if session and not session.get("is_private") and not ctx.args:
         quiz = session.get("quiz_data", {})
@@ -1329,7 +1375,7 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         polls = session.get("polls", {})
         correct_mark = float(quiz.get("correct_mark", quiz.get("correct_marks", 1)) or 1)
         negative_marking = float(quiz.get("negative_marking", quiz.get("negative_marks", 0)) or 0)
-        rows: list[tuple[str, float, int, int, float]] = []
+        rows: list[dict] = []
         for participant in participants.values():
             correct = wrong = 0
             total_time = 0.0
@@ -1344,21 +1390,21 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                     correct += 1
                 else:
                     wrong += 1
-            score = correct * correct_mark - wrong * negative_marking
-            rows.append((participant.get("name", "Aspirant"), score, correct, wrong, total_time))
-        rows.sort(key=lambda item: (item[1], -item[4]), reverse=True)
-        title = f"🏆 <b>Live Leaderboard</b> — {escape(str(quiz.get('quiz_name', 'Quiz')))}"
+            rows.append({
+                "name": participant.get("name", "Aspirant"),
+                "score": correct * correct_mark - wrong * negative_marking,
+                "correct": correct, "wrong": wrong, "total_time": total_time,
+            })
+        rows.sort(key=lambda item: (item["score"], -item["total_time"]), reverse=True)
         if not rows:
             await safe_send_message(ctx, chat.id, "📊 No answers have been recorded yet.")
             return
-        lines = [title]
-        for rank, (name, score, correct, wrong, total_time) in enumerate(rows[:20], 1):
-            minutes, seconds = divmod(int(total_time), 60)
-            lines.append(
-                f"{rank}. <b>{escape(str(name))}</b> — {score:.2f} pts | "
-                f"✅ {correct}  ❌ {wrong} | ⏱️ {minutes}m {seconds}s"
-            )
-        await safe_send_message(ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML)
+        await _send_leaderboard_table(
+            ctx, chat.id, str(quiz.get("quiz_name", "Quiz")), rows,
+            total_questions=len(quiz.get("questions", [])), status="Live Standings",
+            subtitle=f"Live standings · {len(quiz.get('questions', []))} questions · {len(rows)} participants",
+            thread_id=_get_topic_thread_id(update), limit=20,
+        )
         return
 
     from ..state import pollquiz_sessions
@@ -1366,21 +1412,18 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     if pollquiz_session and not ctx.args:
         from .poll_quiz import pollquiz_score_rows
         poll_rows = pollquiz_score_rows(pollquiz_session)
-        title = f"🏆 <b>Poll Quiz Leaderboard</b> — {escape(str(pollquiz_session.get('quiz_name', 'Quiz')))}"
-        lines = [title, f"📊 Scores from {len(pollquiz_session.get('polls', {}))}/{pollquiz_session.get('total_questions', 0)} posted questions.\n"]
-        for rank, row in enumerate(poll_rows[:20], 1):
-            lines.append(
-                f"{rank}. <b>{escape(str(row['name']))}</b> — {row['score']:.2f} pts | "
-                f"✅ {row['correct']}  ❌ {row['wrong']} | "
-                f"📝 {row['answered']}/{pollquiz_session.get('total_questions', 0)} answered"
-            )
         if not poll_rows:
-            lines.append("No answers have been recorded yet. Participants must answer the individual polls in this group.")
-        if not pollquiz_session.get("finalized"):
-            lines.append("\nThis is a live snapshot. The bot will close the polls and publish the final leaderboard automatically when the configured quiz duration ends. /pollstop can end it early.")
-        await safe_send_message(
-            ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML,
-            thread_id=pollquiz_session.get("message_thread_id"),
+            await safe_send_message(ctx, chat.id, "📊 No answers have been recorded yet. Participants must answer the individual polls in this group.")
+            return
+        await _send_leaderboard_table(
+            ctx, chat.id, str(pollquiz_session.get("quiz_name", "Poll Quiz")), poll_rows,
+            total_questions=pollquiz_session.get("total_questions", 0),
+            status="Live Standings" if not pollquiz_session.get("finalized") else "Final Results",
+            subtitle=(
+                f"{len(pollquiz_session.get('polls', {}))}/{pollquiz_session.get('total_questions', 0)} "
+                f"questions posted · {len(poll_rows)} participants"
+            ),
+            thread_id=pollquiz_session.get("message_thread_id"), limit=20,
         )
         return
 
@@ -1398,20 +1441,18 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     if not rows_db:
         await safe_send_message(ctx, chat.id, f"📊 No saved scores found for quiz {escape(qid)} yet.")
         return
-    title = f"🏆 <b>Leaderboard</b> — {escape(str((quiz_doc or {}).get('quiz_name') or qid))}"
-    lines = [title]
-    for rank, entry in enumerate(rows_db, 1):
-        name = entry.get("user_name") or entry.get("username") or "Aspirant"
-        score = float(entry.get("score", 0) or 0)
-        correct = int(entry.get("correct", 0) or 0)
-        wrong = int(entry.get("wrong", 0) or 0)
-        total_time = float(entry.get("time_taken", 0) or 0)
-        minutes, seconds = divmod(int(total_time), 60)
-        lines.append(
-            f"{rank}. <b>{escape(str(name))}</b> — {score:.2f} pts | "
-            f"✅ {correct}  ❌ {wrong} | ⏱️ {minutes}m {seconds}s"
-        )
-    await safe_send_message(ctx, chat.id, "\n".join(lines), parse_mode=ParseMode.HTML)
+    quiz_doc = quiz_doc or {}
+    rows = [{
+        "name": entry.get("user_name") or entry.get("username") or "Aspirant",
+        "score": entry.get("score", 0), "correct": entry.get("correct", 0),
+        "wrong": entry.get("wrong", 0), "time_taken": entry.get("time_taken", 0),
+    } for entry in rows_db]
+    await _send_leaderboard_table(
+        ctx, chat.id, str(quiz_doc.get("quiz_name") or qid), rows,
+        total_questions=len(quiz_doc.get("questions") or []), status="Saved Leaderboard",
+        subtitle=f"Saved results · {len(quiz_doc.get('questions') or [])} questions · {len(rows)} participants",
+        thread_id=_get_topic_thread_id(update), limit=20,
+    )
 
 
 async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
