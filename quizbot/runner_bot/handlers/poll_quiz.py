@@ -370,22 +370,23 @@ async def _send_pollquiz_scoreboard(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, session: dict, rows: list[dict],
     thread_id: Optional[int] = None,
 ) -> None:
-    from html import escape
-    title = escape(str(session.get("quiz_name") or "Quiz"))
-    lines = [f"🏆 <b>Poll Quiz Leaderboard — {title}</b>",
-             f"📊 Answered questions are counted out of {session.get('total_questions', 0)}.\n"]
-    if not rows:
-        lines.append("No non-anonymous answers were received, so no individual scores can be calculated.")
-    else:
-        for rank, row in enumerate(rows[:20], 1):
-            name = escape(str(row.get("name") or "Aspirant"))
-            lines.append(
-                f"{rank}. <b>{name}</b> — {row['score']:.2f} pts | "
-                f"✅ {row['correct']}  ❌ {row['wrong']} | "
-                f"📝 {row['answered']}/{session.get('total_questions', 0)} answered"
-            )
-    await safe_send_message(
-        ctx, chat_id, "\n".join(lines), parse_mode=ParseMode.HTML, thread_id=thread_id,
+    """Publish the poll-quiz final leaderboard using the shared rich table."""
+    # Lazy import avoids a module cycle: quiz_play routes incoming poll answers
+    # to poll_quiz, while poll_quiz reuses the central leaderboard renderer.
+    from .quiz_play import _send_leaderboard_table
+
+    total = int(session.get("total_questions", 0) or 0)
+    title = str(session.get("quiz_name") or "Poll Quiz")
+    await _send_leaderboard_table(
+        ctx,
+        chat_id,
+        title,
+        rows,
+        total_questions=total,
+        status="Final Poll Results",
+        subtitle=f"Poll quiz completed · {total} questions · {len(rows)} participants",
+        thread_id=thread_id,
+        limit=20,
     )
 
 
