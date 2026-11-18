@@ -99,9 +99,14 @@ def _pad_table_blocks(text: str) -> str:
     return out
 
 
-_ABCD_RE = re.compile(r"^[A-Da-d]\s*[).:]")
-
-_OPTION_LINE_RE = re.compile(r"^\s*[A-Da-d]\s*[).:]\s*\S")
+# Telegram quiz polls support 2–12 options (A–L). Start a block only at A)
+# so Roman-numeral statements such as "I. ..." inside CLAT passages are not
+# mistaken for answer choices. Detect M) as well so a 13-option question is
+# kept together and rejected rather than split into a misleading 12-option item.
+MIN_OPTIONS = 2
+MAX_OPTIONS = 12
+_OPTION_START_RE = re.compile(r"^\s*A\s*[).:]\s*\S", re.IGNORECASE)
+_OPTION_LINE_RE = re.compile(r"^\s*[A-M]\s*[).:]\s*\S", re.IGNORECASE)
 _QUESTION_LABEL_RE = re.compile(r"^\s*(?:(?:question|q)\s*)?\d+\s*[.):]\s*\S", re.IGNORECASE)
 _QUESTION_STARTS = (
     "what ", "which ", "who ", "when ", "where ", "why ", "how ",
@@ -118,7 +123,7 @@ def _is_question_prompt_line(line: str) -> bool:
 def _extract_shared_passage(block: str) -> str:
     lines = block.split("\n")
     first_option = next((i for i, line in enumerate(lines)
-                         if _OPTION_LINE_RE.match(line)), len(lines))
+                         if _OPTION_START_RE.match(line)), len(lines))
     candidates = [i for i, line in enumerate(lines[:first_option])
                   if line.strip() and _is_question_prompt_line(line)]
     if not candidates:
@@ -131,7 +136,7 @@ def _extract_shared_passage(block: str) -> str:
 def _inherit_shared_passage(blocks: list[str]) -> list[str]:
     """Repeat each leading passage for later questions that refer to it.
 
-    CLAT-style sets often provide one passage followed by multiple A-D
+    CLAT-style sets often provide one passage followed by multiple A-L
     question blocks. Preserve that context on every parsed question, while
     allowing a later block with its own passage to start a new passage group.
     """
@@ -155,7 +160,7 @@ def _inherit_shared_passage(blocks: list[str]) -> list[str]:
 def split_question_blocks(text: str) -> list[str]:
     """Split pasted/TXT content without breaking blank paragraphs in passages.
 
-    A boundary is recognised after a run of at least two A-D option lines.
+    A boundary is recognised after a run of at least two labelled option lines.
     Blank lines inside a passage remain part of the same question. Legacy
     formats without labelled options retain blank-line-separated behaviour.
     """
@@ -168,7 +173,7 @@ def split_question_blocks(text: str) -> list[str]:
     found_option_run = False
     i = 0
     while i < len(lines):
-        if not _OPTION_LINE_RE.match(lines[i]):
+        if not _OPTION_START_RE.match(lines[i]):
             i += 1
             continue
 
@@ -252,7 +257,7 @@ def parse_question_block(blk: str) -> Optional[dict]:
             filtered.append(ln)
     all_lines = filtered
 
-    # Structural scan (separator / A-D markers) only ever needs to look at
+    # Structural scan (separator / option markers) only ever needs to look at
     # non-blank lines, but indexes must map back into `all_lines` so the
     # split point doesn't chop a preserved blank line in half.
     non_blank_idx = [i for i, ln in enumerate(all_lines) if ln.strip()]
@@ -265,19 +270,19 @@ def parse_question_block(blk: str) -> Optional[dict]:
             sep_line_idx = i
             break
 
-    abcd_line_idx = None
+    option_line_idx = None
     for i in non_blank_idx:
-        if _ABCD_RE.match(all_lines[i].strip()):
-            abcd_line_idx = i
+        if _OPTION_START_RE.match(all_lines[i].strip()):
+            option_line_idx = i
             break
 
     first_nonblank = non_blank_idx[0]
     if sep_line_idx is not None:
         q_lines = all_lines[:sep_line_idx]
         opt_lines = all_lines[sep_line_idx + 1:]
-    elif abcd_line_idx is not None and abcd_line_idx > first_nonblank:
-        q_lines = all_lines[:abcd_line_idx]
-        opt_lines = all_lines[abcd_line_idx:]
+    elif option_line_idx is not None and option_line_idx > first_nonblank:
+        q_lines = all_lines[:option_line_idx]
+        opt_lines = all_lines[option_line_idx:]
     else:
         # No structural marker found -- fall back to "first non-blank line
         # is the question, everything after is options" (matches the
@@ -301,13 +306,13 @@ def parse_question_block(blk: str) -> Optional[dict]:
         if not ln.strip():
             continue
         ln = ln.strip()
-        ln = re.sub(r"^[A-Da-d]\s*[).:]\s*", "", ln)
+        ln = re.sub(r"^[A-La-l]\s*[).:]\s*", "", ln)
         if "✅" in ln:
             coids.append(len(opts))
             ln = ln.replace("✅", "").strip()
         opts.append(ln)
 
-    if not question or len(opts) < 2 or not coids:
+    if not question or not (MIN_OPTIONS <= len(opts) <= MAX_OPTIONS) or not coids:
         return None
 
     coid = coids[0] if len(coids) == 1 else coids
