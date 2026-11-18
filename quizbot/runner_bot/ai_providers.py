@@ -47,6 +47,10 @@ AIQUIZ_LANG = {
     "ur": "Urdu (اردو script)",
     "or": "Odia/Oriya (ଓଡ଼ିଆ script)",
 }
+MIN_POLL_OPTIONS = 2
+MAX_POLL_OPTIONS = 12
+
+
 AIQUIZ_LANG_UI = {
     "en": "🇬🇧 English",
     "hi": "🇮🇳 Hindi",
@@ -66,16 +70,16 @@ QUESTION_FORMAT = """[TASK]Generate {count} MCQ on: "{topic}"
 [STYLE]{diff}|{exam}
 [LANG]{lang}
 [RULES]JSON array only. No prose. No markdown. Start with [ end with ]
-Each item: {{"q":"<270ch","o":["A","B","C","D"],"c":[0],"e":"<150ch or null"}}
-c = 0-based correct index array. Multi-correct allowed.
+Each item: {{"q":"<270ch","o":["option 1","option 2", "... up to 12 options"],"c":[0],"e":"<150ch or null"}}
+Each question must have 2–12 distinct options; use 4 by default unless the topic/request benefits from more. c = 0-based correct index array. Multi-correct allowed.
 [OUTPUT]"""
 
 QUESTION_FORMAT_BILINGUAL = """[TASK]Generate {count} MCQ on: "{topic}"
 [STYLE]{diff}|{exam}
 [LANG]Bilingual: {lang1} / {lang2}
 [RULES]JSON array only. No prose. No markdown. Start with [ end with ]
-Each item: {{"q":"<question in {lang1_short}> / <question in {lang2_short}>","o":["<A in {lang1_short}> / <A in {lang2_short}>","<B in {lang1_short}> / <B in {lang2_short}>","<C in {lang1_short}> / <C in {lang2_short}>","<D in {lang1_short}> / <D in {lang2_short}>"],"c":[0],"e":"<exp in {lang1_short}> / <exp in {lang2_short}> or null"}}
-Use / as separator between the two languages in every text field.
+Each item: {{"q":"<question in {lang1_short}> / <question in {lang2_short}>","o":["<option 1 in both languages>","<option 2 in both languages>","... up to 12 options"],"c":[0],"e":"<exp in {lang1_short}> / <exp in {lang2_short}> or null"}}
+Each question must have 2–12 distinct options; use 4 by default unless the topic/request benefits from more. Use / as separator between the two languages in every text field.
 Keep total q length ≤270 chars, each option ≤90 chars.
 [OUTPUT]"""
 
@@ -255,14 +259,28 @@ def parse_ai_questions(raw: str) -> list[dict]:
                     o = obj.get("o", [])
                     c = obj.get("c", [])
                     e = obj.get("e") or None
-                    if not q or not isinstance(o, list) or len(o) < 2:
+                    if not q or not isinstance(o, list) or not (MIN_POLL_OPTIONS <= len(o) <= MAX_POLL_OPTIONS):
                         continue
                     if not isinstance(c, list) or not c:
                         continue
-                    opts = [str(x).strip()[:95] for x in o if str(x).strip()]
-                    if len(opts) < 2:
+                    # Preserve the original option indexes when dropping empty
+                    # option strings, otherwise the AI's correct indexes shift.
+                    opts = []
+                    old_to_new = {}
+                    for old_index, value in enumerate(o):
+                        option_text = str(value).strip()[:95]
+                        if not option_text:
+                            continue
+                        old_to_new[old_index] = len(opts)
+                        opts.append(option_text)
+                    if not (MIN_POLL_OPTIONS <= len(opts) <= MAX_POLL_OPTIONS):
                         continue
-                    valid_c = [int(i) for i in c if isinstance(i, (int, float)) and 0 <= int(i) < len(opts)]
+                    valid_c = sorted({
+                        old_to_new[int(i)] for i in c
+                        if isinstance(i, (int, float))
+                        and int(i) in old_to_new
+                        and float(i).is_integer()
+                    })
                     if not valid_c:
                         continue
                     coid = valid_c[0] if len(valid_c) == 1 else valid_c
@@ -294,12 +312,12 @@ def parse_ai_questions(raw: str) -> list[dict]:
                 explanation = ln[3:].strip()[:200]
                 continue
             is_correct = "✅" in ln
-            opt = re.sub(r"^[A-Da-d][.)]\ *", "", ln.replace("✅", "").strip())
+            opt = re.sub(r"^[A-La-l][).:]\s*", "", ln.replace("✅", "").strip(), flags=re.IGNORECASE)
             if is_correct:
                 correct_ids.append(len(options))
             if opt:
                 options.append(opt)
-        if not question or len(options) < 2 or not correct_ids:
+        if not question or not (MIN_POLL_OPTIONS <= len(options) <= MAX_POLL_OPTIONS) or not correct_ids:
             continue
         coid = correct_ids[0] if len(correct_ids) == 1 else correct_ids
         questions.append({
@@ -409,9 +427,10 @@ async def gemini_page_questions(
         f"strictly based on content visible in this page. "
         f"If the page has very little content, generate fewer questions — quality over quantity.\n\n"
         f"YOU MUST RESPOND WITH ONLY A JSON ARRAY. No text before or after. No markdown.\n"
-        f'Each object: {{"q":"question","o":["A","B","C","D"],"c":[0],"e":"explanation"}}\n'
+        f'Each object: {{"q":"question","o":["option 1","option 2","... up to 12 options"],"c":[0],"e":"explanation"}}\n'
+        f"Each question must have 2–12 distinct options; use 4 by default unless the topic/request benefits from more.\n"
         f"- q: question text (max 270 chars)\n"
-        f"- o: 2-4 options (max 90 chars each)\n"
+        f"- o: 2-12 distinct options (max 90 chars each; use 4 by default unless more are useful or requested)\n"
         f"- c: correct indices array (0-based)\n"
         f"- e: short explanation (max 150 chars, or null)\n"
         f"Start your response with [ and end with ]"
