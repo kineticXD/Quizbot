@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Telegram API hard limits.
 TG_QUESTION_MAX = 295
+TG_OPTION_MIN = 2
+TG_OPTION_MAX_COUNT = 12
 TG_OPTION_MAX = 100
 TG_EXPLANATION_MAX = 200
 TG_DESCRIPTION_MAX = 1024
@@ -214,6 +216,14 @@ def prepare_poll_data(
       - any option > 100 chars -> full options shown in description/overflow
       - explanation > 200 chars -> trimmed to 190 chars + "..."
     """
+    if not isinstance(options, (list, tuple)) or not (TG_OPTION_MIN <= len(options) <= TG_OPTION_MAX_COUNT):
+        raise ValueError(
+            f"Telegram quiz polls require {TG_OPTION_MIN}–{TG_OPTION_MAX_COUNT} options; "
+            f"received {len(options) if isinstance(options, (list, tuple)) else 'invalid option data'}."
+        )
+    if any(not isinstance(option, str) or not option.strip() for option in options):
+        raise ValueError("Every Telegram poll option must be a non-empty string.")
+
     prefix = f"[{question_index + 1}/{total_questions}] "
     is_multiline = "\n" in question_text.strip()
 
