@@ -11,7 +11,10 @@ import json
 import logging
 from typing import Optional
 
-from ..parsing import filter_words, parse_question_block, split_question_blocks, strip_source_noise
+from ..parsing import (
+    MAX_OPTIONS, MIN_OPTIONS, filter_words, parse_question_block,
+    split_question_blocks, strip_source_noise,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,7 @@ def _process_json(raw: dict, remove_words: list[str], out_questions: list[dict])
             question_text = strip_source_noise(question_text)
 
             options_data = q["options"]
-            if not isinstance(options_data, list) or len(options_data) < 2:
+            if not isinstance(options_data, list) or not (MIN_OPTIONS <= len(options_data) <= MAX_OPTIONS):
                 continue
 
             options: list[str] = []
@@ -134,7 +137,7 @@ def _process_json(raw: dict, remove_words: list[str], out_questions: list[dict])
                     continue
                 id_to_index[opt["id"]] = len(options)
                 options.append(text)
-            if len(options) < 2:
+            if not (MIN_OPTIONS <= len(options) <= MAX_OPTIONS):
                 continue
 
             correct_id = q["correct_option_id"]
