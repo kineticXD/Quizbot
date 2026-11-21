@@ -23,7 +23,7 @@ from quizbot.shared.rich_quiz import RichDispatchResult, enrich_question_dispatc
 from quizbot.shared.utils import is_premium_user
 
 from ..quiz_utils import shuffle_options_multi
-from ..state import channel_poll_tasks, pollquiz_sessions
+from ..state import channel_poll_tasks, pollquiz_controls, pollquiz_sessions
 from ..telegram_utils import (
     prepare_poll_data,
     safe_send_message,
@@ -84,7 +84,7 @@ async def _pollquiz_send_one(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, q: dict, idx: int, total: int,
     do_shuffle: bool, is_anonymous: bool = True, shuffle_count: int = 0,
     score_session: Optional[dict] = None, thread_id: Optional[int] = None,
-    poll_open_period: Optional[int] = None,
+    poll_open_period: Optional[int] = None, skip_control: Optional[dict] = None,
 ) -> bool:
     """Send one question as an auto-closing poll. Returns True on success.
     Applies the same rich-text pre-pass as the timed group/private senders:
@@ -155,6 +155,9 @@ async def _pollquiz_send_one(
                 "sent_time": time.time(),
                 "message_id": sent.message_id,
             }
+        if sent and skip_control is not None:
+            skip_control["active_poll_id"] = sent.poll.id
+            skip_control["active_poll_message_id"] = sent.message_id
         return bool(sent)
     except Exception as e:
         logger.error("_pollquiz_send_one idx=%d: %s", idx, e, exc_info=True)
@@ -171,6 +174,7 @@ async def run_channel_pollquiz(
     channel mode deliberately has no individual leaderboard.
     """
     score_session: Optional[dict] = None
+    control: Optional[dict] = None
     try:
         questions = quiz.get("questions", [])
         total = len(questions)
@@ -178,6 +182,17 @@ async def run_channel_pollquiz(
         shuffle_o_count = quiz.get("shuffle_options_count", 0)
         poll_delay = 3.5 if total <= 20 else 4.0 if total <= 50 else 5.0
         auto_close_seconds = _resolve_auto_close_seconds(auto_close_seconds, total, poll_delay)
+
+        control = {
+            "skip_event": None,
+            "active_poll_id": None,
+            "active_poll_message_id": None,
+            "current_index": None,
+            "skip_requested": False,
+            "posting_complete": False,
+            "message_thread_id": thread_id,
+        }
+        pollquiz_controls[chat_id] = control
 
         if not is_anonymous:
             score_session = {
@@ -205,8 +220,8 @@ async def run_channel_pollquiz(
             ctx, chat_id,
             f"📣 <b>{quiz.get('quiz_name', 'Quiz')}</b>\n"
             f"❓ {total} questions • ⏳ Polls close automatically after {_format_duration(auto_close_seconds)}."
-            + ("\n\nThe final group leaderboard will be posted automatically when the quiz ends. /leaderboard shows a live snapshot; /pollstop remains available for an early manual finish."
-               if score_session is not None else "\n\nThese channel polls are anonymous, so Telegram does not provide individual scores or a personal leaderboard."),
+            + ("\n\nThe final group leaderboard will be posted automatically when the quiz ends. /leaderboard shows a live snapshot. Use /skip to close the current poll while questions are still being posted, or /pollstop to end the entire poll quiz early."
+               if score_session is not None else "\n\nThese channel polls are anonymous, so Telegram does not provide individual scores or a personal leaderboard. Use /skip to close the current poll while questions are still being posted, or /pollstop to stop the entire poll quiz."),
             parse_mode=ParseMode.HTML, thread_id=thread_id,
         )
         await asyncio.sleep(1.5)
@@ -214,14 +229,43 @@ async def run_channel_pollquiz(
         for idx, q in enumerate(questions):
             if asyncio.current_task().cancelled():
                 raise asyncio.CancelledError()
+            skip_event = asyncio.Event()
+            control.update({
+                "skip_event": skip_event,
+                "active_poll_id": None,
+                "active_poll_message_id": None,
+                "current_index": idx,
+                "skip_requested": False,
+            })
             sent = await _pollquiz_send_one(
                 ctx, chat_id, q, idx, total, do_shuffle,
                 is_anonymous=is_anonymous, shuffle_count=shuffle_o_count,
                 score_session=score_session, thread_id=thread_id,
                 poll_open_period=_poll_open_period(auto_close_seconds, total, poll_delay, idx),
+                skip_control=control,
             )
-            await asyncio.sleep(poll_delay if sent else poll_delay + 2.0)
+            delay = poll_delay if sent else poll_delay + 2.0
+            try:
+                await asyncio.wait_for(skip_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            if control.get("skip_event") is skip_event:
+                control.update({
+                    "skip_event": None,
+                    "active_poll_id": None,
+                    "active_poll_message_id": None,
+                    "current_index": None,
+                    "skip_requested": False,
+                })
 
+        control.update({
+            "posting_complete": True,
+            "skip_event": None,
+            "active_poll_id": None,
+            "active_poll_message_id": None,
+            "current_index": None,
+            "skip_requested": False,
+        })
         if score_session is not None:
             score_session["posting_complete"] = True
             await safe_send_message(
@@ -261,7 +305,52 @@ async def run_channel_pollquiz(
         logger.error("run_channel_pollquiz error: %s", e, exc_info=True)
         await safe_send_message(ctx, chat_id, "⚠️ Poll quiz stopped because an error occurred. Check the bot logs.", thread_id=thread_id)
     finally:
-        channel_poll_tasks.pop(chat_id, None)
+        # Do not let an older finishing task remove a newer task registered
+        # for the same chat after a quick stop/restart cycle.
+        current_task = asyncio.current_task()
+        if channel_poll_tasks.get(chat_id) is current_task:
+            channel_poll_tasks.pop(chat_id, None)
+        if control is not None and pollquiz_controls.get(chat_id) is control:
+            pollquiz_controls.pop(chat_id, None)
+
+
+async def skip_active_pollquiz_question(
+    ctx: ContextTypes.DEFAULT_TYPE, chat_id: int,
+) -> tuple[bool, str]:
+    """Close the most recently posted poll and wake the /pollquiz poster."""
+    control = pollquiz_controls.get(chat_id)
+    task = channel_poll_tasks.get(chat_id)
+    if not control or not task or task.done():
+        return False, "⚠️ No poll quiz is currently posting questions."
+    if control.get("posting_complete"):
+        return False, "ℹ️ All questions have already been posted. Use /pollstop to end the poll quiz and close its remaining polls."
+
+    event = control.get("skip_event")
+    poll_id = control.get("active_poll_id")
+    message_id = control.get("active_poll_message_id")
+    question_index = control.get("current_index")
+    if not isinstance(event, asyncio.Event) or not poll_id or not message_id or question_index is None:
+        return False, "⚠️ There is no active poll to skip yet. Try again after the current poll appears."
+    if control.get("skip_requested") or event.is_set():
+        return False, "⏭️ A skip is already being processed."
+
+    control["skip_requested"] = True
+    try:
+        await ctx.bot.stop_poll(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        logger.warning("Could not close /pollquiz poll for /skip in chat %s: %s", chat_id, exc)
+        if pollquiz_controls.get(chat_id) is control and control.get("skip_event") is event:
+            control["skip_requested"] = False
+        return False, "⚠️ I couldn't close the current poll, so I haven't skipped it. Please try again."
+
+    if (
+        pollquiz_controls.get(chat_id) is control
+        and control.get("skip_event") is event
+        and control.get("current_index") == question_index
+    ):
+        event.set()
+        return True, f"⏭️ Question {int(question_index) + 1} skipped. Moving to the next poll."
+    return False, "ℹ️ That poll finished while /skip was being processed; no newer question was skipped."
 
 
 def pollquiz_score_rows(session: dict) -> list[dict]:
