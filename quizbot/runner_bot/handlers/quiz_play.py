@@ -50,7 +50,10 @@ from ..quiz_utils import (
     section_marks,
     shuffle_options_multi,
 )
-from ..state import channel_poll_tasks, pending_quiz_settings, rate_limiter, session_mgr, tasks, translation_mgr
+from ..state import (
+    channel_poll_tasks, pending_quiz_settings, pollquiz_controls,
+    rate_limiter, session_mgr, tasks, translation_mgr,
+)
 from ..telegram_utils import (
     _get_topic_thread_id,
     prepare_poll_data,
@@ -200,6 +203,56 @@ async def wait_until_resumed(chat_id: int) -> None:
         if not s or not s.get("paused"):
             return
         await asyncio.sleep(1.5)
+
+
+async def _arm_question_skip(chat_id: int, question_index: int) -> asyncio.Event | None:
+    """Create a fresh skip signal before a poll is published.
+
+    Clearing the previous poll identifiers first prevents /skip from acting
+    on an older question while the next question is still being prepared.
+    """
+    session = session_mgr.get(chat_id)
+    if not session:
+        return None
+    event = asyncio.Event()
+    session.update({
+        "question_skip_event": event,
+        "skip_requested": False,
+        "waiting_for_answer": False,
+        "active_poll_id": None,
+        "active_poll_message_id": None,
+        "current_index": question_index,
+    })
+    await session_mgr.update(chat_id, session)
+    return event
+
+
+async def _finish_question_skip(
+    chat_id: int, event: asyncio.Event, poll_id: Optional[str] = None,
+) -> None:
+    """Disarm a question's skip control without touching a newer question."""
+    session = session_mgr.get(chat_id)
+    if not session or session.get("question_skip_event") is not event:
+        return
+    if poll_id is not None and session.get("active_poll_id") not in (poll_id, None):
+        return
+    session.update({
+        "question_skip_event": None,
+        "skip_requested": False,
+        "waiting_for_answer": False,
+        "active_poll_id": None,
+        "active_poll_message_id": None,
+    })
+    await session_mgr.update(chat_id, session)
+
+
+async def _wait_for_skip_or_timeout(event: asyncio.Event, timeout: int) -> bool:
+    """Return True when /skip wakes the active question before its timer."""
+    try:
+        await asyncio.wait_for(event.wait(), timeout=max(0, float(timeout)))
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 def _apply_char_boost(q: dict, timer: int) -> int:
@@ -365,6 +418,8 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
 
         protect = not (chat_id == s["quiz_data"].get("creator_id"))
 
+        skip_event = await _arm_question_skip(chat_id, idx)
+
         poll_msg = await safe_send_poll(
             ctx, chat_id, question=poll_q, options=poll_opts, type=Poll.QUIZ,
             explanation=poll_expl, is_anonymous=False, open_period=timer,
@@ -372,6 +427,9 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
         )
 
         if poll_msg:
+            s = session_mgr.get(chat_id)
+            if not s:
+                return
             s["active_poll_id"] = poll_msg.poll.id
             s["active_poll_message_id"] = poll_msg.message_id
             s["waiting_for_answer"] = True
@@ -396,13 +454,25 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
 
 
 async def _private_timeout(chat_id: int, poll_id: str, timer: int) -> None:
-    await asyncio.sleep(timer + 2)
     s = session_mgr.get(chat_id)
     if not s or s.get("active_poll_id") != poll_id:
+        return
+    skip_event = s.get("question_skip_event")
+    if isinstance(skip_event, asyncio.Event):
+        await _wait_for_skip_or_timeout(skip_event, timer + 2)
+    else:
+        await asyncio.sleep(timer + 2)
+
+    s = session_mgr.get(chat_id)
+    if not s or s.get("active_poll_id") != poll_id or not s.get("waiting_for_answer"):
         return
     s["waiting_for_answer"] = False
     cur = s.get("current_index", 0)
     s["current_index"] = cur + 1
+    s["active_poll_id"] = None
+    s["active_poll_message_id"] = None
+    s["question_skip_event"] = None
+    s["skip_requested"] = False
     await session_mgr.update(chat_id, s)
 
     ctx = s.get("context")
@@ -638,6 +708,8 @@ async def _run_flat_quiz(
         if poll_desc:
             poll_kwargs["description"] = poll_desc
 
+        skip_event = await _arm_question_skip(chat_id, idx)
+
         poll_msg = await safe_send_poll(
             ctx, chat_id, question=poll_q, options=poll_opts, type=Poll.QUIZ,
             explanation=poll_expl, is_anonymous=False, open_period=timer,
@@ -645,14 +717,22 @@ async def _run_flat_quiz(
         )
 
         if poll_msg:
+            s = session_mgr.get(chat_id)
+            if not s:
+                return
             s["active_poll_id"] = poll_msg.poll.id
             s["active_poll_message_id"] = poll_msg.message_id
             s["current_index"] = idx
+            s["waiting_for_answer"] = True
             s["polls"][poll_msg.poll.id] = {
                 "correct_option": correct_ids, "sent_time": time.time(), "question_index": idx,
             }
             await session_mgr.update(chat_id, s)
-            await asyncio.sleep(timer + 1)
+            if skip_event is not None:
+                await _wait_for_skip_or_timeout(skip_event, timer + 1)
+                await _finish_question_skip(chat_id, skip_event, poll_msg.poll.id)
+            else:
+                await asyncio.sleep(timer + 1)
 
             if quiz.get("show_explanation"):
                 await _send_explanation_after_poll(ctx, chat_id, q, thread_id=thread_id)
@@ -793,6 +873,8 @@ async def _run_sectioned_quiz(
             if poll_desc:
                 poll_kwargs["description"] = poll_desc
 
+            skip_event = await _arm_question_skip(chat_id, q_idx)
+
             poll_msg = await safe_send_poll(
                 ctx, chat_id, question=poll_q, options=poll_opts, type=Poll.QUIZ,
                 explanation=poll_expl, is_anonymous=False, open_period=timer,
@@ -800,14 +882,22 @@ async def _run_sectioned_quiz(
             )
 
             if poll_msg:
+                s = session_mgr.get(chat_id)
+                if not s:
+                    return
                 s["active_poll_id"] = poll_msg.poll.id
                 s["active_poll_message_id"] = poll_msg.message_id
                 s["current_index"] = q_idx
+                s["waiting_for_answer"] = True
                 s["polls"][poll_msg.poll.id] = {
                     "correct_option": correct_ids, "sent_time": time.time(), "question_index": q_idx,
                 }
                 await session_mgr.update(chat_id, s)
-                await asyncio.sleep(timer + 1)
+                if skip_event is not None:
+                    await _wait_for_skip_or_timeout(skip_event, timer + 1)
+                    await _finish_question_skip(chat_id, skip_event, poll_msg.poll.id)
+                else:
+                    await asyncio.sleep(timer + 1)
 
                 if quiz.get("show_explanation"):
                     await _send_explanation_after_poll(ctx, chat_id, q, thread_id=thread_id)
@@ -1236,6 +1326,114 @@ async def _authorize_quiz_control(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     return chat.id, session
 
 
+async def skip_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Skip the currently open question without waiting for its timer.
+
+    Standard timed quizzes use a per-question asyncio.Event. The separate
+    /pollquiz mode exposes a helper that closes only the most recently posted
+    poll and wakes its posting loop.
+    """
+    chat = update.effective_chat
+    message = update.effective_message
+    user = update.effective_user
+
+    # Channel posts have no effective_user. CommandHandler("skip") is
+    # registered before the generic channel-command router, so handle this
+    # update shape here instead of letting the command get swallowed.
+    if update.channel_post is not None and chat and message:
+        try:
+            await ctx.bot.delete_message(chat_id=chat.id, message_id=message.message_id)
+        except Exception:
+            pass
+        from .poll_quiz import skip_active_pollquiz_question
+        _ok, response = await skip_active_pollquiz_question(ctx, chat.id)
+        await safe_send_message(ctx, chat.id, response)
+        return
+
+    if not chat or not message or not user:
+        return
+
+    session = session_mgr.get(chat.id)
+    if session:
+        authorized = await _authorize_quiz_control(update, ctx)
+        if not authorized:
+            return
+        chat_id, session = authorized
+
+        poll_id = session.get("active_poll_id")
+        message_id = session.get("active_poll_message_id")
+        event = session.get("question_skip_event")
+        if not session.get("waiting_for_answer") or not poll_id or not message_id or not isinstance(event, asyncio.Event):
+            await safe_send_message(
+                ctx, chat_id,
+                "⚠️ There is no open question to skip yet. Use /skip after the current poll appears.",
+                thread_id=session.get("message_thread_id"),
+            )
+            return
+        if session.get("skip_requested") or event.is_set():
+            await safe_send_message(
+                ctx, chat_id, "⏭️ A skip is already being processed.",
+                thread_id=session.get("message_thread_id"),
+            )
+            return
+
+        question_number = int(session.get("current_index", 0)) + 1
+        session["skip_requested"] = True
+        await session_mgr.update(chat_id, session)
+        try:
+            # Closing the Telegram poll reveals the correct answer and stops
+            # late submissions before the next question is published.
+            await ctx.bot.stop_poll(chat_id=chat_id, message_id=message_id)
+        except Exception as exc:
+            logger.warning("Could not close question poll for /skip in chat %s: %s", chat_id, exc)
+            current = session_mgr.get(chat_id)
+            if current and current.get("question_skip_event") is event:
+                current["skip_requested"] = False
+                await session_mgr.update(chat_id, current)
+            await safe_send_message(
+                ctx, chat_id,
+                "⚠️ I couldn't close the current poll, so I haven't skipped it. Please try again.",
+                thread_id=session.get("message_thread_id"),
+            )
+            return
+
+        current = session_mgr.get(chat_id)
+        if current and current.get("question_skip_event") is event and current.get("active_poll_id") == poll_id:
+            event.set()
+            await safe_send_message(
+                ctx, chat_id,
+                f"⏭️ Question {question_number} skipped by the quiz admin. Moving to the next question.",
+                thread_id=session.get("message_thread_id"),
+            )
+        else:
+            await safe_send_message(
+                ctx, chat_id,
+                "ℹ️ The question ended while /skip was being processed; no newer question was skipped.",
+                thread_id=session.get("message_thread_id"),
+            )
+        return
+
+    # /pollquiz has its own task/session because its polls are posted as a
+    # series rather than one-at-a-time timed questions.
+    control = pollquiz_controls.get(chat.id)
+    task = channel_poll_tasks.get(chat.id)
+    if control and task and not task.done():
+        if chat.type == ChatType.PRIVATE:
+            allowed = user.id == chat.id
+        else:
+            allowed = await _require_admin(ctx, chat.id, user.id, _is_anon_admin(message))
+        if not allowed:
+            await safe_send_message(ctx, chat.id, "🔒 Only group/channel admins can control this poll quiz.")
+            return
+
+        from .poll_quiz import skip_active_pollquiz_question
+        _ok, response = await skip_active_pollquiz_question(ctx, chat.id)
+        await safe_send_message(ctx, chat.id, response, thread_id=getattr(message, "message_thread_id", None))
+        return
+
+    await safe_send_message(ctx, chat.id, "⚠️ No active quiz question is available to skip.")
+
+
 async def pause_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     authorized = await _authorize_quiz_control(update, ctx)
     if not authorized:
@@ -1476,6 +1674,7 @@ async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
 def register(application: Application) -> None:
     application.add_handler(CommandHandler("start", start_quiz_command))
+    application.add_handler(CommandHandler("skip", skip_command))
     application.add_handler(CommandHandler("pause", pause_command))
     application.add_handler(CommandHandler("resume", resume_command))
     application.add_handler(CommandHandler("stop", stop_command))
