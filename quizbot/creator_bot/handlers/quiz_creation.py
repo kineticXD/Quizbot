@@ -61,7 +61,7 @@ _RESERVED_COMMANDS = [
     "tsr", "mocktest", "features", "gcast", "stopcast", "statses", "testapi",
     "leaders", "aspirants", "limit", "listquiz", "removeuser",
     # Runner-side controls must never be mistaken for quiz question text.
-    "pause", "resume", "stop", "slow", "fast", "normal", "timer", "leaderboard",
+    "skip", "pause", "resume", "stop", "slow", "fast", "normal", "timer", "leaderboard",
     "pollquiz", "pollstop", "mix", "aiquiz", "pdfquiz", "schedule", "viewschedule",
     "cancelschedule", "trans",
 ]
