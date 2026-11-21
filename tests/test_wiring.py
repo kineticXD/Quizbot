@@ -24,7 +24,7 @@ def test_core_quiz_player_commands_are_registered():
     commands = _registered_commands(ROOT / "quizbot/runner_bot/handlers/quiz_play.py")
 
     assert {
-        "start", "pause", "resume", "stop", "slow", "fast", "normal", "timer", "leaderboard"
+        "start", "skip", "pause", "resume", "stop", "slow", "fast", "normal", "timer", "leaderboard"
     } <= commands
 
 
@@ -38,8 +38,31 @@ def test_runner_registry_includes_quiz_player_module():
 def test_creator_help_mentions_unified_player_entry_points():
     source = (ROOT / "quizbot/creator_bot/handlers/admin.py").read_text(encoding="utf-8")
 
-    for command in ("/start <id>", "/pause", "/resume", "/stop", "/leaderboard"):
+    for command in ("/start <id>", "/skip", "/pause", "/resume", "/stop", "/leaderboard"):
         assert command in source
+
+
+def test_skip_is_reserved_during_creator_input_sessions():
+    creation = (ROOT / "quizbot/creator_bot/handlers/quiz_creation.py").read_text(encoding="utf-8")
+    editing = (ROOT / "quizbot/creator_bot/handlers/quiz_editing.py").read_text(encoding="utf-8")
+    assert '"skip"' in creation
+    assert '"skip"' in editing
+
+
+def test_skip_wakes_standard_and_pollquiz_question_waits():
+    player = (ROOT / "quizbot/runner_bot/handlers/quiz_play.py").read_text(encoding="utf-8")
+    poll_quiz = (ROOT / "quizbot/runner_bot/handlers/poll_quiz.py").read_text(encoding="utf-8")
+    state = (ROOT / "quizbot/runner_bot/state.py").read_text(encoding="utf-8")
+
+    assert "await _wait_for_skip_or_timeout(skip_event, timer + 1)" in player
+    assert "await _wait_for_skip_or_timeout(skip_event, timer + 2)" in player
+    assert 'await ctx.bot.stop_poll(chat_id=chat_id, message_id=message_id)' in player
+    assert "event.set()" in player
+    assert "pollquiz_controls" in state
+    assert "skip_active_pollquiz_question" in poll_quiz
+    assert "await asyncio.wait_for(skip_event.wait(), timeout=delay)" in poll_quiz
+    assert "if update.channel_post is not None" in player
+    assert "channel_poll_tasks.get(chat_id) is current_task" in poll_quiz
 
 
 def test_timer_command_is_documented_for_users():
