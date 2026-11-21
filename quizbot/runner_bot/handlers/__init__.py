@@ -12,7 +12,7 @@ from telegram.ext import Application
 from . import admin, ai_quiz, mix, pdf_quiz, poll_quiz, quiz_play, reports, scheduling, setup_wizard, translation
 
 _MODULES = (
-    quiz_play,     # /start, /pause, /resume, /stop, /leaderboard, /slow, /fast, /normal, poll answers
+    quiz_play,     # /start, /skip, /pause, /resume, /stop, /leaderboard, timer controls, poll answers
     setup_wizard,  # qs_* quiz-setup wizard callbacks
     poll_quiz,     # /pollquiz, /pollstop
     mix,           # /mix
