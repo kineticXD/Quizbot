@@ -112,6 +112,18 @@ def test_stop_finalizer_uses_quiz_data_questions_when_session_has_no_copy():
         assert len(quiz_data["questions"]) == 2
         return True
 
+    async def send_leaderboard_table(ctx, chat_id, quiz_name, rows, **kwargs):
+        # `_end_group_quiz` delegates presentation to this module-level helper;
+        # provide a deterministic stub in this AST-isolated regression test.
+        label = "Partial Leaderboard" if kwargs.get("status") == "Partial Results" else "Final Leaderboard"
+        row = rows[0] if rows else {}
+        sent.append(
+            f"{label} {quiz_name} {kwargs.get('total_questions')} "
+            f"{html.escape(str(row.get('name', '')))} {float(row.get('score', 0)):.2f} pts "
+            f"{row.get('correct', 0)}✅ {row.get('wrong', 0)}❌"
+        )
+        return object()
+
     class FakeAsyncio:
         sleep = staticmethod(no_sleep)
 
@@ -127,6 +139,7 @@ def test_stop_finalizer_uses_quiz_data_questions_when_session_has_no_copy():
         "session_mgr": FakeSessionManager(session),
         "_get_topic_thread_id": lambda _value: None,
         "safe_send_message": safe_send_message,
+        "_send_leaderboard_table": send_leaderboard_table,
         "ParseMode": SimpleNamespace(HTML="HTML"),
         "escape": html.escape,
         "is_correct": lambda selected, correct: set(selected) == set(correct),
