@@ -26,12 +26,13 @@ HELP_TEXT = (
     "\U0001F4D6 <b>Runner Bot — Command Reference</b>\n\n"
     "<b>Playing quizzes</b>\n"
     "/start &lt;quiz_id&gt; [skip] — launch a quiz\n"
+    "/skip — skip the current question immediately (quiz owner in private; group admins)\n"
     "/pause, /resume, /stop — control the running quiz\n"
     "/slow, /fast, /normal — adjust the per-question timer\n"
     "/timer <seconds> — set an exact timer for upcoming questions (10–3600)\n"
     "/leaderboard — show a live leaderboard mid-quiz\n\n"
     "<b>Other quiz modes</b>\n"
-    "/pollquiz &lt;quiz_id&gt; [minutes], /pollstop — auto-closing poll quiz; final group leaderboard is posted automatically (default 60 min)\n"
+    "/pollquiz &lt;quiz_id&gt; [minutes] — auto-closing poll quiz (default 60 min); /skip closes the current poll during posting; /pollstop ends the whole run\n"
     "/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt; ... — combine quizzes\n"
     "/aiquiz &lt;topic&gt; — AI-generated quiz\n"
     "/pdfquiz — reply to a PDF to generate a quiz from it\n\n"
@@ -48,7 +49,7 @@ async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle `/pollquiz` and `/pollstop` sent as channel posts (these
+    """Handle `/pollquiz`, `/pollstop` and `/skip` sent as channel posts (these
     arrive via `update.channel_post`, not `update.message`)."""
     from .poll_quiz import run_channel_pollquiz
 
@@ -64,6 +65,12 @@ async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         pass
 
     try:
+        if text.startswith("/skip"):
+            from .poll_quiz import skip_active_pollquiz_question
+            _ok, response = await skip_active_pollquiz_question(ctx, chat_id)
+            await safe_send_message(ctx, chat_id, response)
+            return
+
         if text.startswith("/pollstop"):
             task = channel_poll_tasks.get(chat_id)
             if task and not task.done():
