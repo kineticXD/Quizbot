@@ -610,7 +610,7 @@ def register(app: Client) -> None:
         filters.regex(r"^(?!hmenu:|stg_|dtc_|plan_|pay_|buy_|qd_|srch_|bat_|prev:|next:|refresh:)")
     )(edit_tree_cb)
     runner_commands = [
-        "start", "help", "pause", "resume", "stop", "slow", "fast", "normal",
+        "start", "help", "skip", "pause", "resume", "stop", "slow", "fast", "normal",
         "timer", "leaderboard", "pollquiz", "pollstop", "mix", "aiquiz", "pdfquiz",
         "schedule", "viewschedule", "cancelschedule", "trans", "pay", "create",
     ]
