@@ -150,6 +150,11 @@ channel_poll_tasks: dict[int, asyncio.Task] = {}
 # Channel polls are anonymous by Telegram design and cannot produce individual ranks.
 pollquiz_sessions: dict[int, dict[str, Any]] = {}
 
+# Live control state for /pollquiz while it is still posting questions. The
+# ordinary quiz runner uses SessionManager; this registry covers the separate
+# poll-series engine, including anonymous channel polls.
+pollquiz_controls: dict[int, dict[str, Any]] = {}
+
 # Pending quiz-setup wizard state (before a quiz begins), keyed by chat_id.
 # See handlers/setup_wizard.py for the qs_* callback flow that populates this.
 pending_quiz_settings: dict[int, dict[str, Any]] = {}
