@@ -15,6 +15,9 @@
 
 start - Start the bot and see welcome message
 create - Create a new quiz
+sourcequiz - Create a quiz from a passage or study file
+createfromtext - Alias for sourcequiz
+sourcequizcancel - Cancel source-to-quiz mode
 done - Finish and save the current quiz
 cancel - Cancel quiz creation in progress
 list - List all your quizzes
@@ -50,6 +53,16 @@ slow - Decrease quiz speed
 fast - Increase quiz speed
 normal - Reset quiz speed to normal
 leaderboard - Show current quiz leaderboard
+timer - Set exact per-question timer
+pollquiz - Publish a timed poll quiz
+quizpoll - Alias for pollquiz
+publish - Alias for pollquiz
+pollsettings - Configure poll timer, anonymity and shuffling
+pollstop - Stop a running poll quiz
+schedule - Schedule a regular quiz or timed poll (HH:MM / 15m)
+viewschedule - View pending quiz and poll schedules
+myschedules - Alias for viewing pending schedules
+cancelschedule - Cancel a scheduled quiz
 result - Show your personal quiz result
 compare - Compare results with another user
 check - Show system health and stats

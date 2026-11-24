@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import Any
+import uuid
+from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -20,8 +22,10 @@ from telegram import Update
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from quizbot.database import QuizRepository, get_db
+from quizbot.database import PollQuizSettingsRepository, ScheduledQuizRepository, QuizRepository, get_db
 from quizbot.shared.utils import is_premium_user
+from ..schedule_utils import parse_schedule_spec
+from ..quiz_utils import resolve_quiz_access
 
 from ..telegram_utils import safe_send_message
 
@@ -31,61 +35,141 @@ IST = pytz.timezone("Asia/Kolkata")
 
 
 class ScheduledQuizManager:
-    """Tracks pending scheduled-quiz jobs and drives their launch via the
-    shared AsyncIOScheduler instance."""
+    """MongoDB-backed schedule manager; pending jobs are restored on startup."""
 
-    def __init__(self, scheduler: AsyncIOScheduler) -> None:
+    def __init__(self, scheduler: AsyncIOScheduler, application) -> None:
         self.scheduler = scheduler
+        self.application = application
+        self.repo = ScheduledQuizRepository(get_db())
         self.jobs: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
-    async def add(self, chat_id: int, qid: str, scheduled_time: datetime, created_by: int, ctx: ContextTypes.DEFAULT_TYPE) -> str:
+    def _job_time(self, run_at: float) -> datetime:
+        scheduled = datetime.fromtimestamp(float(run_at), tz=timezone.utc).astimezone(IST)
+        now = datetime.now(IST)
+        # A schedule missed during downtime should run promptly after recovery.
+        return max(scheduled, now + timedelta(seconds=2))
+
+    def _register_job(self, record: dict[str, Any]) -> None:
+        schedule_id = str(record["schedule_id"])
+        run_date = self._job_time(float(record["run_at"]))
+        self.scheduler.add_job(
+            self._run, trigger=DateTrigger(run_date=run_date),
+            args=[schedule_id], id=schedule_id, replace_existing=True,
+            misfire_grace_time=86400,
+        )
+        self.jobs[schedule_id] = record
+
+    async def restore(self) -> int:
+        """Rebuild APScheduler jobs from MongoDB after each process restart."""
+        records = await self.repo.list_pending()
+        restored = 0
         async with self._lock:
-            job_id = f"quiz_{chat_id}_{qid}_{int(scheduled_time.timestamp())}"
-            self.scheduler.add_job(
-                self._run, trigger=DateTrigger(run_date=scheduled_time),
-                args=[chat_id, qid, ctx], id=job_id, replace_existing=True,
-            )
-            self.jobs[job_id] = {
-                "chat_id": chat_id, "quiz_id": qid, "scheduled_time": scheduled_time,
-                "created_by": created_by, "created_at": datetime.now(IST),
-            }
-            return job_id
+            for record in records:
+                try:
+                    self._register_job(record)
+                    restored += 1
+                except Exception:
+                    logger.exception("Could not restore scheduled quiz %s", record.get("schedule_id"))
+        logger.info("Restored %d pending scheduled quiz(es)", restored)
+        return restored
+
+    async def add(
+        self, chat_id: int, qid: str, scheduled_time: datetime, created_by: int,
+        ctx: Optional[ContextTypes.DEFAULT_TYPE] = None, thread_id: Optional[int] = None,
+        run_mode: str = "quiz", poll_settings: Optional[dict] = None,
+    ) -> str:
+        schedule_id = "qsch_" + uuid.uuid4().hex[:12]
+        record = await self.repo.create(
+            schedule_id=schedule_id, chat_id=chat_id, quiz_id=qid,
+            run_at=scheduled_time.timestamp(), created_by=created_by, thread_id=thread_id,
+            run_mode=run_mode, poll_settings=poll_settings,
+        )
+        async with self._lock:
+            try:
+                self._register_job(record)
+            except Exception:
+                await self.repo.delete(schedule_id)
+                raise
+        return schedule_id
 
     async def remove(self, job_id: str) -> bool:
         async with self._lock:
-            if job_id not in self.jobs:
-                return False
+            existed = self.jobs.pop(job_id, None) is not None
             try:
                 self.scheduler.remove_job(job_id)
             except Exception:
                 pass
-            del self.jobs[job_id]
-            return True
+            deleted = await self.repo.delete(job_id)
+            return existed or deleted
 
     async def get_for_chat(self, chat_id: int) -> list[dict[str, Any]]:
-        async with self._lock:
-            return [{**v, "job_id": k} for k, v in self.jobs.items() if v["chat_id"] == chat_id]
+        records = await self.repo.list_for_chat(chat_id)
+        output = []
+        for record in records:
+            record["job_id"] = record["schedule_id"]
+            record["scheduled_time"] = datetime.fromtimestamp(float(record["run_at"]), tz=timezone.utc).astimezone(IST)
+            output.append(record)
+        return output
 
-    async def _run(self, chat_id: int, qid: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        from .setup_wizard import _launch_quiz_from_settings
-
+    async def _run(self, schedule_id: str) -> None:
+        """Consume a persisted job once, then launch its standard or poll runner."""
+        record = await self.repo.get(schedule_id)
+        if not record:
+            self.jobs.pop(schedule_id, None)
+            return
+        # Remove before delivery for at-most-once behaviour after process crashes.
+        await self.repo.delete(schedule_id)
+        self.jobs.pop(schedule_id, None)
+        chat_id = int(record["chat_id"])
+        qid = str(record["quiz_id"])
+        admin_id = int(record.get("created_by") or chat_id)
+        thread_id = record.get("thread_id")
+        ctx = SimpleNamespace(bot=self.application.bot, application=self.application)
         try:
-            admin_id = None
-            async with self._lock:
-                for jid, info in list(self.jobs.items()):
-                    if info["chat_id"] == chat_id and info["quiz_id"] == qid:
-                        admin_id = info["created_by"]
-                        self.jobs.pop(jid, None)
-                        break
-            admin_id = admin_id or chat_id
-
             quiz_repo = QuizRepository(get_db())
             quiz = await quiz_repo.get(qid)
             if not quiz:
-                await safe_send_message(ctx, chat_id, f"❌ Scheduled quiz {qid} not found. Try /start {qid} manually.")
+                await safe_send_message(ctx, chat_id, f"❌ Scheduled quiz {qid} not found. Try /start {qid} manually.", thread_id=thread_id)
                 return
 
+            run_at = datetime.fromtimestamp(float(record["run_at"]), tz=timezone.utc).astimezone(IST)
+            if record.get("run_mode") == "poll":
+                from .poll_quiz import run_channel_pollquiz
+                from ..state import channel_poll_tasks, session_mgr
+
+                current_task = channel_poll_tasks.get(chat_id)
+                if (current_task and not current_task.done()) or session_mgr.get(chat_id):
+                    await safe_send_message(
+                        ctx, chat_id,
+                        f"⚠️ Scheduled poll quiz {qid} was not started because another quiz is active in this chat.",
+                        thread_id=thread_id,
+                    )
+                    return
+
+                poll_settings = record.get("poll_settings") or {}
+                timer_seconds = int(poll_settings.get("timer_seconds", 0) or 0)
+                task = asyncio.create_task(run_channel_pollquiz(
+                    ctx, chat_id, quiz,
+                    is_anonymous=bool(poll_settings.get("anonymous", False)),
+                    thread_id=thread_id,
+                    auto_close_seconds=timer_seconds or None,
+                    shuffle_questions=bool(poll_settings.get("shuffle_questions", False)),
+                    shuffle_options=bool(poll_settings.get("shuffle_options", False)),
+                    publish_scoreboard=bool(poll_settings.get("scoreboard", True)),
+                ))
+                channel_poll_tasks[chat_id] = task
+                timer_label = f"{timer_seconds // 60} min" if timer_seconds else "global default"
+                await safe_send_message(
+                    ctx, chat_id,
+                    f"📣 <b>Scheduled poll quiz is starting!</b>\n\n"
+                    f"Quiz: <b>{quiz.get('quiz_name', 'Quiz')}</b> (<code>{qid}</code>)\n"
+                    f"Poll auto-close: <b>{timer_label}</b>",
+                    parse_mode=ParseMode.HTML, thread_id=thread_id,
+                )
+                return
+
+            from .setup_wizard import _launch_quiz_from_settings
             quiz["question_set_id"] = quiz["qid"]
             quiz["negative_marking"] = quiz.get("negative_marks", 0)
             quiz["correct_mark"] = quiz.get("correct_marks", 1)
@@ -107,7 +191,7 @@ class ScheduledQuizManager:
                     self.chat = _FakeChat(cid)
                     self.from_user = _FakeUser(admin_id)
                     self.message_id = int(time.time())
-                    self.message_thread_id = None
+                    self.message_thread_id = thread_id
 
             class _FakeUpdate:
                 def __init__(self, cid: int) -> None:
@@ -125,16 +209,16 @@ class ScheduledQuizManager:
 
             await safe_send_message(
                 ctx, chat_id,
-                f"\U0001F3AF <b>Scheduled Quiz Starting!</b>\n\nQuiz ID: <code>{qid}</code>\n"
-                f"Started at: {datetime.now(IST).strftime('%I:%M %p')}\n"
+                f"🎯 <b>Scheduled Quiz Starting!</b>\n\nQuiz ID: <code>{qid}</code>\n"
+                f"Scheduled for: {run_at.strftime('%I:%M %p, %d %b')}\n"
                 f"⏱ Timer: {quiz.get('timer', 30)}s | Questions: {len(quiz.get('questions', []))}",
-                parse_mode=ParseMode.HTML,
+                parse_mode=ParseMode.HTML, thread_id=thread_id,
             )
             await _launch_quiz_from_settings(chat_id, ctx, ps)
         except Exception as e:
             logger.error("Scheduled quiz exec error: %s", e, exc_info=True)
             try:
-                await safe_send_message(ctx, chat_id, f"❌ Error starting scheduled quiz {qid}: {e}\nTry /start {qid}")
+                await safe_send_message(ctx, chat_id, f"❌ Error starting scheduled quiz {qid}: {e}\nTry /start {qid}", thread_id=thread_id)
             except Exception:
                 pass
 
@@ -142,72 +226,107 @@ class ScheduledQuizManager:
 schedule_mgr: "ScheduledQuizManager | None" = None
 
 
-def init_schedule_manager(scheduler: AsyncIOScheduler) -> ScheduledQuizManager:
+def init_schedule_manager(scheduler: AsyncIOScheduler, application) -> ScheduledQuizManager:
     """Called once from bot.py after the shared scheduler is created."""
     global schedule_mgr
-    schedule_mgr = ScheduledQuizManager(scheduler)
+    schedule_mgr = ScheduledQuizManager(scheduler, application)
     return schedule_mgr
 
 
 async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/schedule QUIZ_ID HH:MM` -- schedule a quiz to auto-launch today
-    (or tomorrow if the time has already passed), IST."""
+    """`/schedule ID HH:MM` for a regular quiz or `/schedule ID 15m` for a timed poll."""
     chat_id = update.message.chat_id
     try:
         user_id = update.message.from_user.id
-        if update.message.chat.type == ChatType.PRIVATE:
-            await safe_send_message(ctx, chat_id, "❌ Groups only.")
+        if update.message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await safe_send_message(ctx, chat_id, "❌ Groups and supergroups only.")
             return
 
         try:
             member = await ctx.bot.get_chat_member(chat_id, user_id)
             if member.status not in ("administrator", "creator"):
-                await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+                await safe_send_message(ctx, chat_id, "🚫 Admin only.")
                 return
         except Exception:
             return
 
         if not await is_premium_user(user_id):
-            await safe_send_message(ctx, chat_id, "\U0001F512 Premium required for scheduling.")
+            await safe_send_message(ctx, chat_id, "🔒 Premium required for scheduling.")
             return
 
-        if len(ctx.args) < 2:
+        if len(ctx.args) != 2:
             await safe_send_message(
                 ctx, chat_id,
-                "\U0001F4C5 Usage: <code>/schedule QUIZ_ID HH:MM</code>\nExample: <code>/schedule ABC123 14:30</code>",
+                "📅 <b>Usage</b>\n"
+                "• <code>/schedule QUIZ_ID 14:30</code> — regular quiz at that IST time\n"
+                "• <code>/schedule QUIZ_ID 15m</code> — timed poll quiz in 15 minutes\n"
+                "Relative poll delays: 1m–30d (examples: 45m, 2h, 1d).",
                 parse_mode=ParseMode.HTML,
             )
             return
 
-        qid, time_str = ctx.args[0], ctx.args[1]
+        qid, schedule_spec = ctx.args[0], ctx.args[1]
         try:
-            h, m = map(int, time_str.split(":"))
-            if not (0 <= h <= 23 and 0 <= m <= 59):
-                raise ValueError
-        except Exception:
-            await safe_send_message(ctx, chat_id, "❌ Invalid time. Use HH:MM (24h).")
+            now = datetime.now(IST)
+            sched_time, run_mode = parse_schedule_spec(schedule_spec, now)
+        except ValueError as exc:
+            await safe_send_message(ctx, chat_id, f"❌ {exc}")
             return
-
-        now = datetime.now(IST)
-        sched_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if sched_time <= now:
-            sched_time += timedelta(days=1)
 
         quiz_repo = QuizRepository(get_db())
         quiz = await quiz_repo.get(qid)
-        if not quiz:
-            await safe_send_message(ctx, chat_id, f"❌ Quiz {qid} not found.")
+        if not quiz or not quiz.get("questions"):
+            await safe_send_message(ctx, chat_id, f"❌ Quiz {qid} not found or has no questions.")
             return
 
-        await schedule_mgr.add(chat_id, qid, sched_time, user_id, ctx)
+        chat_type = "supergroup" if update.message.chat.type == ChatType.SUPERGROUP else "group"
+        allowed, _batch = await resolve_quiz_access(qid, quiz, chat_id, chat_type, user_id, ctx=ctx)
+        if not allowed:
+            await safe_send_message(ctx, chat_id, "🔒 This chat does not have access to that quiz.")
+            return
+
+        poll_settings = None
+        if run_mode == "poll":
+            settings = await PollQuizSettingsRepository(get_db()).get(user_id)
+            poll_settings = {
+                "timer_seconds": int(settings.get("timer_seconds", 0) or 0),
+                "anonymous": bool(settings.get("anonymous", False)),
+                "shuffle_questions": bool(settings.get("shuffle_questions", False)),
+                "shuffle_options": bool(settings.get("shuffle_options", False)),
+                "scoreboard": bool(settings.get("scoreboard", True)),
+            }
+            if poll_settings["timer_seconds"]:
+                from .poll_quiz import _resolve_auto_close_seconds
+                try:
+                    poll_settings["timer_seconds"] = _resolve_auto_close_seconds(
+                        poll_settings["timer_seconds"], len(quiz["questions"]),
+                    )
+                except ValueError as exc:
+                    await safe_send_message(ctx, chat_id, f"❌ Saved poll timer cannot be used for this quiz: {exc}")
+                    return
+
+        thread_id = getattr(update.effective_message, "message_thread_id", None)
+        schedule_id = await schedule_mgr.add(
+            chat_id, qid, sched_time, user_id, ctx, thread_id=thread_id,
+            run_mode=run_mode, poll_settings=poll_settings,
+        )
 
         diff = sched_time - now
-        hrs, rem = divmod(int(diff.total_seconds()), 3600)
-        mins, _ = divmod(rem, 60)
+        days, remainder = divmod(int(diff.total_seconds()), 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        eta = " ".join(part for value, unit in ((days, "d"), (hours, "h"), (minutes, "m")) if value and (part := f"{value}{unit}")) or "less than a minute"
+        mode_label = "Timed poll quiz" if run_mode == "poll" else "Regular quiz"
+        details = (
+            f"\n⏱ Poll auto-close: {poll_settings['timer_seconds'] // 60} min" if run_mode == "poll" and poll_settings["timer_seconds"]
+            else "\n⏱ Poll auto-close: global default" if run_mode == "poll" else ""
+        )
         await safe_send_message(
             ctx, chat_id,
-            f"✅ <b>Scheduled!</b>\n\n\U0001F4DD {quiz.get('quiz_name', 'Quiz')}\n"
-            f"\U0001F550 {sched_time.strftime('%I:%M %p, %d %b')}\n⏱️ In {hrs}h {mins}m",
+            f"✅ <b>{mode_label} scheduled!</b>\n\n"
+            f"📘 {quiz.get('quiz_name', 'Quiz')} (<code>{qid}</code>)\n"
+            f"🆔 Schedule: <code>{schedule_id}</code>\n"
+            f"🕒 {sched_time.strftime('%I:%M %p, %d %b')} IST · in {eta}{details}",
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
@@ -215,33 +334,50 @@ async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def viewschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/viewschedule` -- lists this group's pending scheduled quizzes."""
+    """`/viewschedule` / `/myschedules` -- list this group's pending schedules."""
     chat_id = update.message.chat_id
     try:
-        if update.message.chat.type == ChatType.PRIVATE:
-            await safe_send_message(ctx, chat_id, "❌ Groups only.")
+        if update.message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await safe_send_message(ctx, chat_id, "❌ Groups and supergroups only.")
             return
 
         schedules = await schedule_mgr.get_for_chat(chat_id)
         if not schedules:
-            await safe_send_message(ctx, chat_id, "\U0001F4C5 No scheduled quizzes.")
+            await safe_send_message(ctx, chat_id, "📅 No pending quiz or poll schedules.")
             return
 
-        schedules.sort(key=lambda x: x["scheduled_time"])
+        schedules.sort(key=lambda item: item["scheduled_time"])
         now = datetime.now(IST)
-        text = "\U0001F4C5 <b>Scheduled Quizzes</b>\n\n"
-        for i, s in enumerate(schedules, 1):
-            diff = s["scheduled_time"] - now
+        text = "📅 <b>Pending Quiz & Poll Schedules</b>\n\n"
+        for index, item in enumerate(schedules, 1):
+            diff = item["scheduled_time"] - now
             if diff.total_seconds() > 0:
-                h, r = divmod(int(diff.total_seconds()), 3600)
-                m, _ = divmod(r, 60)
-                until = f"{h}h {m}m"
+                days, remainder = divmod(int(diff.total_seconds()), 86400)
+                hours, remainder = divmod(remainder, 3600)
+                minutes, _ = divmod(remainder, 60)
+                until = " ".join(
+                    part for value, unit in ((days, "d"), (hours, "h"), (minutes, "m"))
+                    if value and (part := f"{value}{unit}")
+                ) or "less than a minute"
             else:
-                until = "Starting soon..."
-            text += f"{i}. <code>{s['quiz_id']}</code>\n   \U0001F550 {s['scheduled_time'].strftime('%I:%M %p, %d %b')} (in {until})\n\n"
+                until = "starting soon"
+
+            mode = "Timed poll" if item.get("run_mode") == "poll" else "Regular quiz"
+            poll_settings = item.get("poll_settings") or {}
+            timer = int(poll_settings.get("timer_seconds", 0) or 0)
+            timer_label = (
+                f" · poll timer {timer // 60}m" if item.get("run_mode") == "poll" and timer
+                else " · global poll timer" if item.get("run_mode") == "poll" else ""
+            )
+            text += (
+                f"{index}. <b>{mode}</b> · <code>{item['quiz_id']}</code>\n"
+                f"   🕒 {item['scheduled_time'].strftime('%I:%M %p, %d %b')} IST (in {until}){timer_label}\n"
+                f"   🆔 <code>{item['job_id']}</code>\n\n"
+            )
+        text += "Cancel with <code>/cancelschedule SCHEDULE_ID</code>."
         await safe_send_message(ctx, chat_id, text, parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error("viewschedule_command error: %s", e)
+        logger.error("viewschedule_command error: %s", e, exc_info=True)
 
 
 async def cancelschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -249,8 +385,8 @@ async def cancelschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     chat_id = update.message.chat_id
     try:
         user_id = update.message.from_user.id
-        if update.message.chat.type == ChatType.PRIVATE:
-            await safe_send_message(ctx, chat_id, "❌ Groups only.")
+        if update.message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await safe_send_message(ctx, chat_id, "❌ Groups and supergroups only.")
             return
 
         try:
@@ -262,21 +398,21 @@ async def cancelschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
             return
 
         if not ctx.args:
-            await safe_send_message(ctx, chat_id, "Usage: <code>/cancelschedule QUIZ_ID</code>", parse_mode=ParseMode.HTML)
+            await safe_send_message(ctx, chat_id, "Usage: <code>/cancelschedule SCHEDULE_ID</code> (or QUIZ_ID)", parse_mode=ParseMode.HTML)
             return
 
-        qid = ctx.args[0]
+        target = ctx.args[0]
         schedules = await schedule_mgr.get_for_chat(chat_id)
-        for s in schedules:
-            if s["quiz_id"] == qid and await schedule_mgr.remove(s["job_id"]):
-                await safe_send_message(ctx, chat_id, f"✅ Schedule cancelled for {qid}.")
+        for item in schedules:
+            if target in (item["job_id"], item["quiz_id"]) and await schedule_mgr.remove(item["job_id"]):
+                await safe_send_message(ctx, chat_id, f"✅ Schedule <code>{item['job_id']}</code> cancelled.", parse_mode=ParseMode.HTML)
                 return
-        await safe_send_message(ctx, chat_id, f"❌ No schedule for {qid}.")
+        await safe_send_message(ctx, chat_id, f"❌ No pending schedule matches {target}.")
     except Exception as e:
         logger.error("cancelschedule_command error: %s", e)
 
 
 def register(application: Application) -> None:
     application.add_handler(CommandHandler("schedule", schedule_command))
-    application.add_handler(CommandHandler("viewschedule", viewschedule_command))
+    application.add_handler(CommandHandler(["viewschedule", "myschedules"], viewschedule_command))
     application.add_handler(CommandHandler("cancelschedule", cancelschedule_command))

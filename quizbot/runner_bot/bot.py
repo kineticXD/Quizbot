@@ -29,15 +29,17 @@ scheduler = AsyncIOScheduler()
 async def post_init(application: Application) -> None:
     """Runs once after Application.initialize() -- starts the scheduler and
     the background watchdog task."""
-    init_schedule_manager(scheduler)
+    schedule_manager = init_schedule_manager(scheduler, application)
     scheduler.start()
+    await schedule_manager.restore()
     tasks.spawn(watchdog_loop(), name="watchdog")
     logger.info("Quiz-player adapter post_init complete (scheduler + watchdog started).")
 
 
 async def post_shutdown(application: Application) -> None:
-    """Runs once during Application.shutdown() -- tears down the scheduler."""
-    scheduler.shutdown(wait=False)
+    """Tear down resources started by post_init in the manual PTB lifecycle."""
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
     logger.info("Quiz-player adapter post_shutdown complete.")
 
 
@@ -62,26 +64,29 @@ def build_application() -> Application:
 async def run_runner_bot() -> None:
     """Run the quiz-player adapter non-blocking alongside the creator adapter.
 
-    Uses the manual PTB lifecycle (initialize/start/start_polling) instead
-    of `run_polling()`, which owns its own event loop and would block the
-    Kurigram creator adapter from running alongside it in this process.
+    The manual PTB lifecycle lets the creator and runner adapters share one
+    event loop. PTB does not auto-call post_init/post_shutdown from this
+    lifecycle, so those hooks are invoked explicitly here.
     """
     application = build_application()
-
     await application.initialize()
-    await application.start()
-    await application.updater.start_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False,
-    )
-    logger.info("Quiz-player adapter polling started.")
-
     try:
-        # Block here until this task is cancelled by the launcher (run.py),
-        # which happens on SIGINT/SIGTERM or if the sibling bot task dies.
+        await application.start()
+        await post_init(application)
+        await application.updater.start_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=False,
+        )
+        logger.info("Quiz-player adapter polling started.")
+
+        # Block until run.py cancels this task on SIGINT/SIGTERM or a sibling
+        # adapter exits unexpectedly.
         await asyncio.Future()
     finally:
         logger.info("Quiz-player adapter shutting down...")
-        await application.updater.stop()
-        await application.stop()
+        if application.updater and application.updater.running:
+            await application.updater.stop()
+        if application.running:
+            await application.stop()
+        await post_shutdown(application)
         await application.shutdown()

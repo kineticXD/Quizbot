@@ -32,14 +32,18 @@ HELP_TEXT = (
     "/timer <seconds> — set an exact timer for upcoming questions (10–3600)\n"
     "/leaderboard — show a live leaderboard mid-quiz\n\n"
     "<b>Other quiz modes</b>\n"
-    "/pollquiz &lt;quiz_id&gt; [minutes] — auto-closing poll quiz (default 60 min); /skip closes the current poll during posting; /pollstop ends the whole run\n"
+    "/pollquiz, /quizpoll, /publish &lt;quiz_id&gt; [minutes] [anonymous|public] — timed poll quiz\n"
+    "/pollsettings — set your default poll timer, anonymity, shuffling and leaderboard\n"
+    "/skip closes the current poll during posting; /pollstop ends the whole run\n"
     "/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt; ... — combine quizzes\n"
     "/aiquiz &lt;topic&gt; — AI-generated quiz\n"
     "/pdfquiz — reply to a PDF to generate a quiz from it\n\n"
     "<b>Reports &amp; settings</b>\n"
     "/html, /pdf — toggle report generation for this chat\n"
     "/trans &lt;lang&gt; — live question translation\n"
-    "/schedule, /viewschedule, /cancelschedule — schedule a quiz\n"
+    "/schedule QUIZ_ID HH:MM — regular quiz at an IST time\n"
+    "/schedule QUIZ_ID 15m — timed poll quiz after a delay\n"
+    "/viewschedule, /myschedules, /cancelschedule — manage schedules\n"
 )
 
 

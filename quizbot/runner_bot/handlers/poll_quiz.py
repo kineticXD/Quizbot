@@ -10,14 +10,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import random
 import time
 from typing import Any, Optional
 
 from telegram import Poll, Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from quizbot.database import AuthChatRepository, QuizRepository, get_db
+from quizbot.database import AuthChatRepository, PollQuizSettingsRepository, QuizRepository, get_db
 from quizbot.shared import config
 from quizbot.shared.rich_quiz import RichDispatchResult, enrich_question_dispatch
 from quizbot.shared.utils import is_premium_user
@@ -167,6 +168,8 @@ async def _pollquiz_send_one(
 async def run_channel_pollquiz(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: dict, is_anonymous: bool = True,
     thread_id: Optional[int] = None, auto_close_seconds: Optional[int] = None,
+    shuffle_questions: Optional[bool] = None, shuffle_options: Optional[bool] = None,
+    publish_scoreboard: bool = True,
 ) -> None:
     """Post questions as auto-closing polls and automatically publish group rankings.
 
@@ -176,10 +179,27 @@ async def run_channel_pollquiz(
     score_session: Optional[dict] = None
     control: Optional[dict] = None
     try:
-        questions = quiz.get("questions", [])
+        questions = [dict(item) for item in quiz.get("questions", [])]
         total = len(questions)
-        do_shuffle = quiz.get("shuffle_options", False)
+        do_shuffle = bool(quiz.get("shuffle_options", False) if shuffle_options is None else shuffle_options)
+        do_shuffle_questions = bool(quiz.get("shuffle_questions", False) if shuffle_questions is None else shuffle_questions)
         shuffle_o_count = quiz.get("shuffle_options_count", 0)
+        if do_shuffle_questions and len(questions) > 1:
+            # Keep questions that share a passage/reference together. The
+            # order of passage groups remains stable; only questions within
+            # each contiguous group are shuffled.
+            groups: list[tuple[str, list[dict]]] = []
+            for item in questions:
+                context_text = str(item.get("reply_text") or item.get("context") or "").strip()
+                if groups and groups[-1][0] == context_text:
+                    groups[-1][1].append(item)
+                else:
+                    groups.append((context_text, [item]))
+            random.shuffle(groups)
+            questions = []
+            for _context, group in groups:
+                random.shuffle(group)
+                questions.extend(group)
         poll_delay = 3.5 if total <= 20 else 4.0 if total <= 50 else 5.0
         auto_close_seconds = _resolve_auto_close_seconds(auto_close_seconds, total, poll_delay)
 
@@ -194,7 +214,7 @@ async def run_channel_pollquiz(
         }
         pollquiz_controls[chat_id] = control
 
-        if not is_anonymous:
+        if not is_anonymous and publish_scoreboard:
             score_session = {
                 "qid": str(quiz.get("qid") or quiz.get("question_set_id") or ""),
                 "quiz": quiz,
@@ -212,8 +232,8 @@ async def run_channel_pollquiz(
             }
             pollquiz_sessions[chat_id] = score_session
         else:
-            # Remove stale group scoring state if this chat is now running an
-            # anonymous channel-style poll series.
+            # Anonymous runs cannot expose voter identities. Public runs may
+            # also intentionally disable collection/leaderboards in settings.
             pollquiz_sessions.pop(chat_id, None)
 
         await safe_send_message(
@@ -221,7 +241,7 @@ async def run_channel_pollquiz(
             f"📣 <b>{quiz.get('quiz_name', 'Quiz')}</b>\n"
             f"❓ {total} questions • ⏳ Polls close automatically after {_format_duration(auto_close_seconds)}."
             + ("\n\nThe final group leaderboard will be posted automatically when the quiz ends. /leaderboard shows a live snapshot. Use /skip to close the current poll while questions are still being posted, or /pollstop to end the entire poll quiz early."
-               if score_session is not None else "\n\nThese channel polls are anonymous, so Telegram does not provide individual scores or a personal leaderboard. Use /skip to close the current poll while questions are still being posted, or /pollstop to stop the entire poll quiz."),
+               if score_session is not None else ("\n\nThese polls are anonymous, so Telegram does not provide individual scores. Use /skip to close the current poll while questions are still being posted, or /pollstop to stop the entire poll quiz." if is_anonymous else "\n\nPolls are public, but individual score collection is disabled in your settings. Use /skip while questions are being posted or /pollstop to stop the entire run.")),
             parse_mode=ParseMode.HTML, thread_id=thread_id,
         )
         await asyncio.sleep(1.5)
@@ -282,21 +302,27 @@ async def run_channel_pollquiz(
                 logger.info("Auto-finalizing poll quiz for chat=%s", chat_id)
                 await finalize_pollquiz(ctx, chat_id)
         else:
-            # Channel polls are anonymous by Telegram design. They still close
-            # automatically, but no individual ranking can be calculated.
-            await safe_send_message(
-                ctx, chat_id,
-                f"✅ All {total} anonymous channel polls are posted. They will close automatically in "
-                f"{_format_duration(auto_close_seconds)}.",
-                thread_id=thread_id,
-            )
+            if is_anonymous:
+                posted_message = (
+                    f"✅ All {total} anonymous polls are posted. They will close automatically in "
+                    f"{_format_duration(auto_close_seconds)}."
+                )
+                end_message = (
+                    "🏁 <b>Quiz ended.</b> All poll questions are now closed. "
+                    "Individual scores are unavailable for anonymous polls."
+                )
+            else:
+                posted_message = (
+                    f"✅ All {total} public polls are posted. They will close automatically in "
+                    f"{_format_duration(auto_close_seconds)}. The final leaderboard is disabled."
+                )
+                end_message = (
+                    "🏁 <b>Quiz ended.</b> All poll questions are now closed. "
+                    "Leaderboard collection was disabled for this run."
+                )
+            await safe_send_message(ctx, chat_id, posted_message, thread_id=thread_id)
             await asyncio.sleep(auto_close_seconds + 7)
-            await safe_send_message(
-                ctx, chat_id,
-                "🏁 <b>Quiz ended.</b> All poll questions are now closed. "
-                "Individual leaderboard scores are unavailable for anonymous channel polls.",
-                parse_mode=ParseMode.HTML, thread_id=thread_id,
-            )
+            await safe_send_message(ctx, chat_id, end_message, parse_mode=ParseMode.HTML, thread_id=thread_id)
     except asyncio.CancelledError:
         if score_session is None or not score_session.get("posting_complete"):
             await safe_send_message(ctx, chat_id, "🛑 Poll quiz posting stopped.", thread_id=thread_id)
@@ -480,7 +506,7 @@ async def _send_pollquiz_scoreboard(
 
 
 async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/pollquiz QUIZID [minutes]` -- auto-closes polls and publishes group scores."""
+    """`/pollquiz QUIZID [minutes] [anonymous|public]` -- timed poll quiz."""
     chat_id = update.message.chat_id
     try:
         chat_type = update.message.chat.type
@@ -491,29 +517,51 @@ async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-        if not ctx.args or len(ctx.args) > 2:
+        if not ctx.args or len(ctx.args) > 3:
             await safe_send_message(
                 ctx, chat_id,
-                "Usage: /pollquiz QUIZ_ID [minutes]\nDefault duration: 60 minutes. "
-                "The final leaderboard is posted automatically when polls close.",
+                "Usage: /pollquiz QUIZ_ID [minutes] [anonymous|public]\n"
+                "Defaults are controlled with /pollsettings. Example: /pollquiz ABC123 30 public",
             )
             return
 
+        settings = (
+            await PollQuizSettingsRepository(get_db()).get(user_id)
+            if user_id else {
+                "timer_seconds": 0, "anonymous": True, "shuffle_questions": False,
+                "shuffle_options": False, "scoreboard": False,
+            }
+        )
         try:
-            if len(ctx.args) == 2:
+            if len(ctx.args) >= 2:
                 duration_minutes = int(ctx.args[1])
                 if not 1 <= duration_minutes <= MAX_POLLQUIZ_MINUTES:
                     raise ValueError
                 duration_seconds = duration_minutes * 60
             else:
-                duration_seconds = _resolve_auto_close_seconds()
+                duration_seconds = int(settings.get("timer_seconds") or config.POLLQUIZ_AUTO_CLOSE_SECONDS)
+            _resolve_auto_close_seconds(duration_seconds)
         except (TypeError, ValueError):
             await safe_send_message(
                 ctx, chat_id,
-                f"Duration must be 1–{MAX_POLLQUIZ_MINUTES} minutes. "
-                "Example: /pollquiz QUIZ_ID 60",
+                f"Duration must be 1–{MAX_POLLQUIZ_MINUTES} minutes. Example: /pollquiz QUIZ_ID 60",
             )
             return
+
+        is_channel = chat_type == ChatType.CHANNEL
+        is_anon = True if is_channel else bool(settings.get("anonymous", False))
+        if len(ctx.args) == 3:
+            requested_mode = str(ctx.args[2]).strip().lower()
+            if requested_mode in ("anonymous", "anon"):
+                is_anon = True
+            elif requested_mode in ("public", "scored"):
+                if is_channel:
+                    await safe_send_message(ctx, chat_id, "Channel polls are anonymous by Telegram design. Run this in a group for public polls and scores.")
+                    return
+                is_anon = False
+            else:
+                await safe_send_message(ctx, chat_id, "Choose either `anonymous` or `public` as the final argument.")
+                return
 
         if user_id and user_id != _ANON_ADMIN_ID and not await is_premium_user(user_id):
             await safe_send_message(ctx, chat_id, "Please help us to make this project more valuable by purchasing premium! Thanks")
@@ -540,12 +588,14 @@ async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await safe_send_message(ctx, chat_id, "❌ Quiz has no questions.")
             return
 
-        is_anon = chat_type == "channel"
         thread_id = getattr(update.effective_message, "message_thread_id", None)
         task = asyncio.create_task(
             run_channel_pollquiz(
                 ctx, chat_id, quiz, is_anonymous=is_anon, thread_id=thread_id,
                 auto_close_seconds=duration_seconds,
+                shuffle_questions=bool(settings.get("shuffle_questions", False)),
+                shuffle_options=bool(settings.get("shuffle_options", False)),
+                publish_scoreboard=bool(settings.get("scoreboard", True)),
             )
         )
         channel_poll_tasks[chat_id] = task
@@ -592,5 +642,6 @@ async def check_channel_paid_access(quiz: dict, chat_id: int) -> Optional[str]:
 
 
 def register(application: Application) -> None:
-    application.add_handler(CommandHandler("pollquiz", pollquiz_channel_command))
+    # Keep familiar aliases from the standalone poll studio.
+    application.add_handler(CommandHandler(["pollquiz", "quizpoll", "publish"], pollquiz_channel_command))
     application.add_handler(CommandHandler("pollstop", pollstop_command))

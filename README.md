@@ -45,12 +45,15 @@
 
 | Category | Capability |
 |---|---|
-| **Quiz Creation** | Text input, forwarded Telegram quiz polls, file/PDF import, AI-generated quizzes |
+| **Quiz Creation** | Text input, forwarded Telegram quiz polls, TXT/JSON/PDF/DOCX import, source-grounded passage-to-MCQ generation, AI-generated quizzes |
 | **Quiz Formats** | Standard, sectional (per-section timers), practice & exam modes |
 | **Smart Filtering** | Strips `[1/100]`-style progress tags, usernames, links, and custom word lists from imported polls |
 | **Editing** | Shuffle questions, retitle, adjust timers, add/remove questions |
 | **Access Control** | Free and paid quiz tiers, batch access, auth-chat lists, optional premium gate |
 | **Analytics** | Per-user performance, leaderboards, sectional score breakdowns |
+| **Timed Poll Quizzes** | Auto-closing Telegram quiz polls, optional anonymous mode, question/option shuffling, final group leaderboard |
+| **Poll Preferences** | Per-user saved timer, anonymity, shuffle and leaderboard settings |
+| **Scheduling** | MongoDB-backed pending schedules restored automatically after restarts |
 | **HTML Reports** | Self-contained interactive HTML scorecards — question navigator, KaTeX/Markdown rendering, dark/light theme |
 | **Mini App** | Visual in-Telegram quiz player (practice + exam mode) as a Telegram WebApp |
 | **Inline Sharing** | Share any quiz by ID via inline query, with a working Play button |
@@ -125,6 +128,12 @@ python run.py
 ```
 
 The database and all its indexes are created automatically on first connect — no manual schema step needed.
+
+### Source-to-quiz and timed polls
+
+Use `/sourcequiz 10` (or `/createfromtext 10`) in the creator bot's private chat, then send a passage or upload a `.txt`, `.md`, `.csv`, `.pdf`, `.docx` or `.json` file. Exit with `/sourcequizcancel`. Formatted MCQs are parsed locally; passages use the shared AI-provider key system with strict source-evidence checks, followed by a conservative offline fact extractor if generation is unavailable. The resulting quiz is saved in the normal MongoDB quiz library and can be launched with either `/start QUIZ_ID` or `/pollquiz QUIZ_ID`.
+
+Use `/pollsettings` to save your default timed-poll duration, anonymity, question/option shuffling and leaderboard preference. An explicit `/pollquiz QUIZ_ID 30 public` setting overrides your default timer/anonymity for that run. Pending schedules are stored in MongoDB and restored after a restart. Use `/schedule QUIZ_ID 14:30` for the existing regular quiz scheduler, or `/schedule QUIZ_ID 15m` (also `2h` / `1d`) to publish a timed poll quiz later with your saved poll preferences. `/viewschedule` and `/myschedules` list both types; `/cancelschedule` accepts a schedule ID or quiz ID.
 
 ---
 

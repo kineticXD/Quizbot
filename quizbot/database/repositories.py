@@ -165,6 +165,12 @@ class QuizRepository:
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
         }
+        # Optional provenance fields used by source-to-quiz imports. Keeping
+        # them on the same quiz document makes the generated quiz available
+        # to every existing player, report and search feature.
+        for field in ("source_type", "source_name", "source_text"):
+            if field in kwargs and kwargs[field] is not None:
+                doc[field] = kwargs[field]
         await self.col.insert_one(doc)
         return await self.get(qid)
 
@@ -1000,3 +1006,89 @@ def _as_object_id(value: Any):
     if isinstance(value, ObjectId):
         return value
     return ObjectId(str(value))
+
+
+class PollQuizSettingsRepository:
+    """Persistent personal defaults for timed /pollquiz runs."""
+
+    DEFAULTS = {
+        "anonymous": False,
+        "timer_seconds": 0,  # 0 means use POLLQUIZ_AUTO_CLOSE_SECONDS.
+        "shuffle_questions": False,
+        "shuffle_options": False,
+        "scoreboard": True,
+    }
+    ALLOWED = frozenset(DEFAULTS)
+
+    def __init__(self, db: Database):
+        self.db = db
+        self.col = db.collection("poll_quiz_settings")
+
+    async def get(self, user_id: int) -> dict:
+        row = await self.col.find_one({"user_id": int(user_id)})
+        if row is None:
+            doc = {"user_id": int(user_id), **self.DEFAULTS, "updated_at": _now_iso()}
+            await self.col.update_one({"user_id": int(user_id)}, {"$setOnInsert": doc}, upsert=True)
+            row = await self.col.find_one({"user_id": int(user_id)}) or doc
+        data = {**self.DEFAULTS, **_clean(row)}
+        return data
+
+    async def update(self, user_id: int, **fields) -> None:
+        values = {key: value for key, value in fields.items() if key in self.ALLOWED}
+        if not values:
+            return
+        if "timer_seconds" in values:
+            timer = int(values["timer_seconds"])
+            if timer not in {0, 600, 1800, 3600, 10800, 43200, 86400}:
+                raise ValueError("Unsupported poll-quiz timer preset.")
+            values["timer_seconds"] = timer
+        for key in ("anonymous", "shuffle_questions", "shuffle_options", "scoreboard"):
+            if key in values:
+                values[key] = bool(values[key])
+        values["updated_at"] = _now_iso()
+        await self.get(user_id)
+        await self.col.update_one({"user_id": int(user_id)}, {"$set": values}, upsert=True)
+
+
+class ScheduledQuizRepository:
+    """MongoDB-backed pending schedules so jobs survive bot restarts."""
+
+    def __init__(self, db: Database):
+        self.db = db
+        self.col = db.collection("scheduled_quizzes")
+
+    async def create(
+        self, schedule_id: str, chat_id: int, quiz_id: str, run_at: float,
+        created_by: int, thread_id: Optional[int] = None,
+        run_mode: str = "quiz", poll_settings: Optional[dict] = None,
+    ) -> dict:
+        if run_mode not in {"quiz", "poll"}:
+            raise ValueError("Unsupported scheduled quiz run mode.")
+        doc = {
+            "schedule_id": str(schedule_id),
+            "chat_id": int(chat_id),
+            "quiz_id": str(quiz_id),
+            "run_at": float(run_at),
+            "created_by": int(created_by),
+            "thread_id": int(thread_id) if thread_id is not None else None,
+            "run_mode": run_mode,
+            "poll_settings": dict(poll_settings or {}),
+            "created_at": _now_iso(),
+        }
+        await self.col.insert_one(doc)
+        return _clean(doc)
+
+    async def get(self, schedule_id: str) -> Optional[dict]:
+        return _clean(await self.col.find_one({"schedule_id": str(schedule_id)}))
+
+    async def list_for_chat(self, chat_id: int) -> list[dict]:
+        cursor = self.col.find({"chat_id": int(chat_id)}).sort("run_at", 1)
+        return [_clean(row) async for row in cursor]
+
+    async def list_pending(self) -> list[dict]:
+        cursor = self.col.find({}).sort("run_at", 1)
+        return [_clean(row) async for row in cursor]
+
+    async def delete(self, schedule_id: str) -> bool:
+        result = await self.col.delete_one({"schedule_id": str(schedule_id)})
+        return bool(result.deleted_count)

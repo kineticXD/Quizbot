@@ -92,6 +92,11 @@ class Database:
         await db.batch_access.create_index([("batch_id", 1), ("chat_id", 1)], unique=True)
         await db.batch_quizzes.create_index([("batch_id", 1), ("qid", 1)], unique=True)
 
+        await db.poll_quiz_settings.create_index("user_id", unique=True)
+        await db.scheduled_quizzes.create_index("schedule_id", unique=True)
+        await db.scheduled_quizzes.create_index("run_at")
+        await db.scheduled_quizzes.create_index("chat_id")
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()

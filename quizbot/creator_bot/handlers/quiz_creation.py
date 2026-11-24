@@ -62,7 +62,8 @@ _RESERVED_COMMANDS = [
     "leaders", "aspirants", "limit", "listquiz", "removeuser",
     # Runner-side controls must never be mistaken for quiz question text.
     "skip", "pause", "resume", "stop", "slow", "fast", "normal", "timer", "leaderboard",
-    "pollquiz", "pollstop", "mix", "aiquiz", "pdfquiz", "schedule", "viewschedule",
+    "pollquiz", "quizpoll", "publish", "pollstop", "pollsettings", "mix", "aiquiz", "pdfquiz", "schedule", "viewschedule",
+    "sourcequiz", "createfromtext", "sourcequizcancel",
     "cancelschedule", "trans",
 ]
 

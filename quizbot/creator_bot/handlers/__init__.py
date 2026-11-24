@@ -22,6 +22,7 @@ from . import (
     quiz_management,
     reports,
     settings,
+    source_quiz,
 )
 
 __all__ = ["register"]
@@ -39,4 +40,5 @@ def register(app: Client) -> None:
     reports.register(app)
     quiz_editing.register(app)
     quiz_creation.register(app)
+    source_quiz.register(app)
     inline.register(app)
