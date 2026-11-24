@@ -175,3 +175,32 @@ def test_pollquiz_duration_is_configurable():
     env = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert 'POLLQUIZ_AUTO_CLOSE_SECONDS: int = _env_int("POLLQUIZ_AUTO_CLOSE_SECONDS", 3600)' in config
     assert "POLLQUIZ_AUTO_CLOSE_SECONDS=3600" in env
+
+
+def test_help_is_registered_on_the_always_running_bot_api_adapter():
+    runner_admin = (ROOT / "quizbot/runner_bot/handlers/admin.py").read_text(encoding="utf-8")
+    creator_admin = (ROOT / "quizbot/creator_bot/handlers/admin.py").read_text(encoding="utf-8")
+
+    assert 'CommandHandler("help", help_command)' in runner_admin
+    assert 'filters.command("help")' not in creator_admin
+
+
+def test_creator_fallback_is_in_runner_registry_and_has_basic_create_flow():
+    registry = (ROOT / "quizbot/runner_bot/handlers/__init__.py").read_text(encoding="utf-8")
+    fallback = (ROOT / "quizbot/runner_bot/handlers/creator_fallback.py").read_text(encoding="utf-8")
+
+    assert "creator_fallback" in registry
+    assert 'CommandHandler("create", create_command)' in fallback
+    assert 'CommandHandler("done", done_command)' in fallback
+    assert 'CommandHandler("cancel", cancel_command)' in fallback
+    assert "QuizRepository(get_db()).create(" in fallback
+    assert "MIN_QUESTIONS = 10" in fallback
+
+
+def test_creator_adapter_readiness_is_exposed_to_runner_fallback():
+    creator = (ROOT / "quizbot/creator_bot/bot.py").read_text(encoding="utf-8")
+    fallback = (ROOT / "quizbot/runner_bot/handlers/creator_fallback.py").read_text(encoding="utf-8")
+
+    assert "runtime.CREATOR_ADAPTER_READY = True" in creator
+    assert "runtime.CREATOR_ADAPTER_READY = False" in creator
+    assert "runtime.CREATOR_ADAPTER_READY" in fallback

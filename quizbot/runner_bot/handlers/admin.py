@@ -43,13 +43,34 @@ HELP_TEXT = (
     "/trans &lt;lang&gt; — live question translation\n"
     "/schedule QUIZ_ID HH:MM — regular quiz at an IST time\n"
     "/schedule QUIZ_ID 15m — timed poll quiz after a delay\n"
-    "/viewschedule, /myschedules, /cancelschedule — manage schedules\n"
+    "/viewschedule, /myschedules, /cancelschedule — manage schedules\n\n"
+    "<b>Quiz creation</b>\n"
+    "/create — create a quiz (send name, questions, then /done; minimum 10 questions)\n"
+    "/done, /cancel — save or discard a quiz draft\n"
+    "/creatorstatus — check creator connection\n"
+    "Advanced creator tools: /sourcequiz, /myquizzes, /edit, /settings and more (requires creator connection).\n"
 )
 
 
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """`/help` -- command reference."""
     await safe_send_message(ctx, update.effective_chat.id, HELP_TEXT, parse_mode=ParseMode.HTML)
+
+
+FEATURES_TEXT = (
+    "<b>Advance Quizbot features</b>\n\n"
+    "• Create and share quizzes with a reusable Quiz ID\n"
+    "• Timed quiz sessions with skip, pause, resume and leaderboard controls\n"
+    "• Timed Telegram poll quizzes with auto-close and saved poll preferences\n"
+    "• AI and PDF quiz generation\n"
+    "• Quiz mixing, scheduling, reports and translation\n"
+    "• Source-based quiz creation and question imports when the creator adapter is connected\n\n"
+    "Use /help for commands and /creatorstatus to check creator availability."
+)
+
+
+async def features_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await safe_send_message(ctx, update.effective_chat.id, FEATURES_TEXT, parse_mode=ParseMode.HTML)
 
 
 async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -157,6 +178,8 @@ async def watchdog_loop() -> None:
 
 
 def register(application: Application) -> None:
-    # /help is owned by the creator-side adapter so a single-bot deployment
-    # never emits duplicate replies from both update clients.
+    # Help/features live on the always-running Bot API adapter so users can
+    # still discover commands while the MTProto creator adapter is reconnecting.
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("features", features_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.CHANNEL, handle_channel_command))

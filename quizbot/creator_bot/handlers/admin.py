@@ -352,8 +352,6 @@ async def leaders_cmd(c: Client, m: Message) -> None:
 
 def register(app: Client) -> None:
     app.on_message(filters.command("start") & filters.private)(start_cmd)
-    app.on_message(filters.command("help"))(help_cmd)
-    app.on_message(filters.command("features"))(features_cmd)
     app.on_message(filters.command("limit") & filters.private)(limit_cmd)
     app.on_message(filters.command("gcast") & filters.private)(gcast_cmd)
     app.on_message(filters.command("stopcast") & filters.private)(stopcast_cmd)

@@ -15,7 +15,7 @@ from typing import Any
 
 from pyrogram import Client
 
-from quizbot.shared import config
+from quizbot.shared import config, runtime
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,7 @@ async def run_creator_bot(stop_event: asyncio.Event | None = None) -> None:
     each new Client instance.
     """
     _log_safe_config_diagnostics()
+    runtime.CREATOR_ADAPTER_READY = False
     own_event = stop_event or asyncio.Event()
     attempt = 0
 
@@ -166,8 +167,12 @@ async def run_creator_bot(stop_event: asyncio.Event | None = None) -> None:
             await app.start()
             me = await app.get_me()
             logger.info("Creator adapter started as @%s", me.username)
+            runtime.CREATOR_ADAPTER_READY = True
             attempt = 0
-            await own_event.wait()
+            try:
+                await own_event.wait()
+            finally:
+                runtime.CREATOR_ADAPTER_READY = False
             return
         except asyncio.CancelledError:
             raise
