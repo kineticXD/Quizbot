@@ -29,7 +29,7 @@ HELP_TEXT = (
     "/skip — skip the current question immediately (quiz owner in private; group admins)\n"
     "/pause, /resume, /stop — control the running quiz\n"
     "/slow, /fast, /normal — adjust the per-question timer\n"
-    "/timer <seconds> — set an exact timer for upcoming questions (10–3600)\n"
+    "/timer &lt;seconds&gt; — set an exact timer for upcoming questions (10–3600)\n"
     "/leaderboard — show a live leaderboard mid-quiz\n\n"
     "<b>Other quiz modes</b>\n"
     "/pollquiz, /quizpoll, /publish &lt;quiz_id&gt; [minutes] [anonymous|public] — timed poll quiz\n"
