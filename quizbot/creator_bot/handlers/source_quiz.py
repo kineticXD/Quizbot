@@ -30,6 +30,7 @@ from ..source_quiz_engine import (
     validate_ai_quiz,
 )
 from .file_import import process_uploaded_file
+from .quiz_creation import _RESERVED_COMMANDS
 
 logger = logging.getLogger(__name__)
 
@@ -350,4 +351,9 @@ def register(app: Client) -> None:
     app.on_message(filters.command(["sourcequiz", "createfromtext"]) & filters.private)(sourcequiz_command)
     app.on_message(filters.command(["sourcequizcancel"]) & filters.private)(sourcequiz_cancel)
     app.on_message(filters.document & filters.private & _source_session_filter())(handle_source_document)
-    app.on_message(filters.text & filters.private & _source_session_filter() & ~filters.command)(handle_source_text)
+    app.on_message(
+        filters.text
+        & filters.private
+        & _source_session_filter()
+        & ~filters.command(_RESERVED_COMMANDS)
+    )(handle_source_text)
