@@ -1,0 +1,24 @@
+Shikimori single Bot API migration — replacement files
+
+.env.example
+BOTFATHER_COMMANDS.txt
+MIGRATION_README.txt
+README.md
+requirements.txt
+run.py
+quizbot/shared/config.py
+quizbot/shared/quiz_file_import.py
+quizbot/shared/callback_utils.py
+quizbot/shared/runtime.py
+quizbot/runner_bot/bot.py
+quizbot/runner_bot/handlers/__init__.py
+quizbot/runner_bot/handlers/admin.py
+quizbot/runner_bot/handlers/creator.py
+quizbot/runner_bot/handlers/creator_batches.py
+quizbot/runner_bot/handlers/creator_reports.py
+quizbot/runner_bot/handlers/creator_admin.py
+quizbot/runner_bot/handlers/quiz_play.py
+tests/test_config.py
+tests/test_import_smoke.py
+tests/test_bot_api_migration.py
+test_import_smoke.py

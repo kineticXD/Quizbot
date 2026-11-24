@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from telegram.ext import Application
 
-from . import admin, ai_quiz, creator_fallback, mix, pdf_quiz, poll_quiz, poll_settings, quiz_play, reports, scheduling, setup_wizard, translation
+from . import admin, ai_quiz, creator, creator_admin, creator_batches, creator_reports, mix, pdf_quiz, poll_quiz, poll_settings, quiz_play, reports, scheduling, setup_wizard, translation
 
 _MODULES = (
     quiz_play,     # /start, /skip, /pause, /resume, /stop, /leaderboard, timer controls, poll answers
@@ -22,8 +22,12 @@ _MODULES = (
     reports,       # /html, /pdf, compare_ callback
     scheduling,    # /schedule, /viewschedule, /cancelschedule
     translation,   # /trans
-    creator_fallback,  # basic creation + graceful responses while MTProto is offline
-    admin,         # /help, /features and channel command routing
+    creator,       # Bot API-native quiz creation, editing, imports, settings, AI keys and payments
+    creator_batches, # Bot API-native batch management
+    creator_reports, # Bot API-native HTML and PDF reports
+    creator_admin,  # Bot API-native broadcasts and owner utilities
+    admin,         # /help, channel command routing (registered last so it doesn't
+                   # shadow the more specific per-feature MessageHandlers above)
 )
 
 

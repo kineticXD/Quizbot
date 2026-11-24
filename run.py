@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Unified launcher for the Telegram Quizbot.
-
-One BotFather token is used by both internal adapters. Kurigram uses MTProto
-for creator-side features; python-telegram-bot uses the Bot API for quiz
-polls, scheduling and runner-side features. The user only configures one bot.
+"""Unified launcher for Quizbot. All quiz-player and migrated creator features
+run through one python-telegram-bot Bot API connection. No MTProto login is
+required for the supported creator workflows.
 """
 from __future__ import annotations
 
@@ -27,17 +25,10 @@ for noisy in ("httpx", "httpcore", "apscheduler", "pymongo", "werkzeug"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-async def _run_creator_bot() -> None:
-    from quizbot.creator_bot.bot import run_creator_bot
-
-    logger.info("Starting creator features on the unified bot account (Kurigram/MTProto)")
-    await run_creator_bot()
-
-
 async def _run_runner_bot() -> None:
     from quizbot.runner_bot.bot import run_runner_bot
 
-    logger.info("Starting quiz-player features on the unified bot account (Bot API)")
+    logger.info("Starting unified quiz and creator features on the Bot API account")
     await run_runner_bot()
 
 
@@ -49,7 +40,7 @@ async def _run_mini_app() -> None:
 
 
 async def main(only: str | None) -> None:
-    component = only or "both"
+    component = only or "runner"
     problems = config.validate(bot=component)
     if problems:
         for problem in problems:
@@ -62,10 +53,8 @@ async def main(only: str | None) -> None:
     logger.info("Database ready.")
 
     tasks: list[asyncio.Task[Any]] = []
-    if only in (None, "creator"):
-        tasks.append(asyncio.create_task(_run_creator_bot(), name="creator_adapter"))
     if only in (None, "runner"):
-        tasks.append(asyncio.create_task(_run_runner_bot(), name="runner_adapter"))
+        tasks.append(asyncio.create_task(_run_runner_bot(), name="bot_api_adapter"))
     if only == "miniapp":
         tasks.append(asyncio.create_task(_run_mini_app(), name="mini_app"))
     elif only is None and config.MINI_APP_DOMAIN:
@@ -123,9 +112,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the unified Telegram Quizbot.")
     parser.add_argument(
         "--only",
-        choices=("creator", "runner", "miniapp"),
+        choices=("runner", "miniapp"),
         default=None,
-        help="Run one internal component for debugging (normal deployments run all features).",
+        help="Run one component for debugging (normal deployments run the unified Bot API bot).",
     )
     arguments = parser.parse_args()
     try:

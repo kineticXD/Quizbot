@@ -23,7 +23,7 @@ from ..telegram_utils import safe_send_message
 logger = logging.getLogger(__name__)
 
 HELP_TEXT = (
-    "\U0001F4D6 <b>Runner Bot — Command Reference</b>\n\n"
+    "\U0001F4D6 <b>Shikimori — Command Reference</b>\n\n"
     "<b>Playing quizzes</b>\n"
     "/start &lt;quiz_id&gt; [skip] — launch a quiz\n"
     "/skip — skip the current question immediately (quiz owner in private; group admins)\n"
@@ -44,33 +44,27 @@ HELP_TEXT = (
     "/schedule QUIZ_ID HH:MM — regular quiz at an IST time\n"
     "/schedule QUIZ_ID 15m — timed poll quiz after a delay\n"
     "/viewschedule, /myschedules, /cancelschedule — manage schedules\n\n"
-    "<b>Quiz creation</b>\n"
-    "/create — create a quiz (send name, questions, then /done; minimum 10 questions)\n"
-    "/done, /cancel — save or discard a quiz draft\n"
-    "/creatorstatus — check creator connection\n"
-    "Advanced creator tools: /sourcequiz, /myquizzes, /edit, /settings and more (requires creator connection).\n"
+    "<b>Quiz creation &amp; management</b>\n"
+    "/create — create a quiz; send a name, then questions; finish with /done\n"
+    "/done, /cancel — save or discard your draft\n"
+    "/sourcequiz [1–20], /sourcequizcancel — create questions from text/PDF/DOCX/TXT/JSON\n"
+    "/myquizzes [term], /info ID, /del ID, /search term\n"
+    "/edit ID — rename, adjust timer/type/marks, add or delete questions, promo and shuffle\n"
+    "/setpromo text, /add CHAT_ID, /rem CHAT_ID, /remall\n"
+    "/settings, /remove, /mywords, /clearlist\n"
+    "/setkey, /mykeys, /delkey — manage AI provider keys\n"
+    "/batch, /createbatch, /searchbatch — batch access and quiz grouping\n"
+    "/whtml QUIZ_ID, /testseries QID... — export reports\n"
+    "/pay — buy premium; /auth and /removeuser — owner/admin premium control\n"
+    "/creatorstatus — check unified Bot API creator status\n\n"
+    "<b>Owner utilities</b>\n"
+    "/statses, /testapi, /limit, /gcast, /stopcast, /listquiz, /ban, /convertall\n"
 )
 
 
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """`/help` -- command reference."""
     await safe_send_message(ctx, update.effective_chat.id, HELP_TEXT, parse_mode=ParseMode.HTML)
-
-
-FEATURES_TEXT = (
-    "<b>Advance Quizbot features</b>\n\n"
-    "• Create and share quizzes with a reusable Quiz ID\n"
-    "• Timed quiz sessions with skip, pause, resume and leaderboard controls\n"
-    "• Timed Telegram poll quizzes with auto-close and saved poll preferences\n"
-    "• AI and PDF quiz generation\n"
-    "• Quiz mixing, scheduling, reports and translation\n"
-    "• Source-based quiz creation and question imports when the creator adapter is connected\n\n"
-    "Use /help for commands and /creatorstatus to check creator availability."
-)
-
-
-async def features_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await safe_send_message(ctx, update.effective_chat.id, FEATURES_TEXT, parse_mode=ParseMode.HTML)
 
 
 async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,8 +172,6 @@ async def watchdog_loop() -> None:
 
 
 def register(application: Application) -> None:
-    # Help/features live on the always-running Bot API adapter so users can
-    # still discover commands while the MTProto creator adapter is reconnecting.
+    # All command help and channel command routing run on this one Bot API client.
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("features", features_command))
     application.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.CHANNEL, handle_channel_command))

@@ -46,10 +46,9 @@ def _env_int_list(key: str) -> list[int]:
 API_ID: int | None = _env_int("API_ID")
 API_HASH: str | None = _env("API_HASH")
 
-# One BotFather token is enough for the unified bot. Internally, the project
-# keeps two protocol adapters: Kurigram/MTProto for creator operations and
-# python-telegram-bot/Bot API for quiz delivery. The legacy variables remain
-# accepted so existing deployments can migrate without losing access.
+# One BotFather token powers the unified Bot API bot. Creator commands and
+# quiz playback share the same python-telegram-bot update loop. Legacy token
+# variables remain accepted so existing deployments can migrate safely.
 BOT_TOKEN: str | None = _env("BOT_TOKEN")
 _LEGACY_CREATOR_BOT_TOKEN: str | None = _env("CREATOR_BOT_TOKEN")
 _LEGACY_RUNNER_BOT_TOKEN: str | None = _env("RUNNER_BOT_TOKEN")
@@ -198,12 +197,12 @@ for _d in (DATA_DIR, CACHE_DIR, TEMP_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
-def validate(bot: str = "both") -> list[str]:
-    """Return actionable configuration errors.
+def validate(bot: str = "runner") -> list[str]:
+    """Return actionable configuration errors for the Bot API deployment.
 
-    ``bot`` may be ``creator``, ``runner``, ``miniapp`` or ``both``. A new
-    installation only needs BOT_TOKEN. The legacy per-adapter token names
-    are supported for backwards compatibility.
+    ``bot`` may be ``runner`` or ``miniapp``. Creator commands now run inside
+    the Bot API adapter, so API_ID/API_HASH are legacy optional settings and
+    are no longer required at startup.
     """
     problems: list[str] = []
     if not MONGODB_URI:
@@ -216,13 +215,7 @@ def validate(bot: str = "both") -> list[str]:
             problems.append("BOT_TOKEN is not set (the Mini App needs the bot token to verify Telegram initData)")
         return problems
 
-    if bot in ("creator", "both"):
-        if not API_ID or not API_HASH:
-            problems.append("API_ID / API_HASH are required by the creator adapter (get them from https://my.telegram.org)")
-        if not CREATOR_BOT_TOKEN:
-            problems.append("BOT_TOKEN is not set (or provide the legacy CREATOR_BOT_TOKEN)")
-
-    if bot in ("runner", "both") and not RUNNER_BOT_TOKEN:
+    if bot == "runner" and not RUNNER_BOT_TOKEN:
         problems.append("BOT_TOKEN is not set (or provide the legacy RUNNER_BOT_TOKEN)")
 
     if not OWNER_ID:

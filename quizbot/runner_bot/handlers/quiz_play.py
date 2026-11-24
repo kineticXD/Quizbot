@@ -1214,8 +1214,10 @@ async def start_quiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     args = list(ctx.args or [])
-    # Payment deep links are handled by the creator-side payment callback.
+    # Premium payment callback is handled through the same Bot API adapter.
     if args and args[0].startswith("pay_"):
+        from .creator import handle_payment_deeplink
+        await handle_payment_deeplink(update, ctx, args[0][4:])
         return
     if not args:
         await safe_send_message(

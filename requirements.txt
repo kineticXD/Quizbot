@@ -1,6 +1,4 @@
 # ---- Telegram ----
-kurigram
-tgcrypto==1.2.5         
 python-telegram-bot==22.8 
 pymongo[srv]>=4.15,<5.0
 

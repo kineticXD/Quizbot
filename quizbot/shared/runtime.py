@@ -1,4 +1,9 @@
-"""In-process health flags shared by the unified bot adapters."""
+"""Compatibility-only runtime flags.
 
-# False until the MTProto creator client has completed authorization.
-CREATOR_ADAPTER_READY: bool = False
+Creator functionality now runs on the same Bot API application as quiz
+playback. There is no separate MTProto creator adapter in the live launcher.
+The legacy flag remains available for older imports but is not used to gate
+Bot API creator features or report service health.
+"""
+
+CREATOR_ADAPTER_READY: bool = False  # Deprecated; retained for compatibility only.

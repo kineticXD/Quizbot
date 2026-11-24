@@ -33,14 +33,14 @@ async def post_init(application: Application) -> None:
     scheduler.start()
     await schedule_manager.restore()
     tasks.spawn(watchdog_loop(), name="watchdog")
-    logger.info("Quiz-player adapter post_init complete (scheduler + watchdog started).")
+    logger.info("Unified Bot API post_init complete (scheduler + watchdog started).")
 
 
 async def post_shutdown(application: Application) -> None:
     """Tear down resources started by post_init in the manual PTB lifecycle."""
     if scheduler.running:
         scheduler.shutdown(wait=False)
-    logger.info("Quiz-player adapter post_shutdown complete.")
+    logger.info("Unified Bot API post_shutdown complete.")
 
 
 def build_application() -> Application:
@@ -62,11 +62,11 @@ def build_application() -> Application:
 
 
 async def run_runner_bot() -> None:
-    """Run the quiz-player adapter non-blocking alongside the creator adapter.
+    """Run the unified Bot API application.
 
-    The manual PTB lifecycle lets the creator and runner adapters share one
-    event loop. PTB does not auto-call post_init/post_shutdown from this
-    lifecycle, so those hooks are invoked explicitly here.
+    Creator and quiz-player handlers are registered on this single PTB
+    application, so no separate MTProto authorization or polling process is
+    needed. The manual lifecycle invokes PTB startup/shutdown hooks explicitly.
     """
     application = build_application()
     await application.initialize()
@@ -77,13 +77,13 @@ async def run_runner_bot() -> None:
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=False,
         )
-        logger.info("Quiz-player adapter polling started.")
+        logger.info("Unified Bot API polling started.")
 
         # Block until run.py cancels this task on SIGINT/SIGTERM or a sibling
         # adapter exits unexpectedly.
         await asyncio.Future()
     finally:
-        logger.info("Quiz-player adapter shutting down...")
+        logger.info("Unified Bot API adapter shutting down...")
         if application.updater and application.updater.running:
             await application.updater.stop()
         if application.running:

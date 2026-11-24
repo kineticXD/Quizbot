@@ -1,69 +1,76 @@
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║              BOTFATHER COMMAND SETUP — Copy & Paste Ready               ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-#
-# HOW TO USE:
-#   1. Open Telegram → @BotFather
-#   2. Send /setcommands
-#   3. Select your bot
-#   4. Copy the block below (without the # lines) and send it
+# BOTFATHER COMMAND SETUP — unified Bot API bot
+# 1. Open Telegram and message @BotFather
+# 2. Send /setcommands and select the single Quizbot/Shikimori bot
+# 3. Paste the commands below
 
-# ════════════════════════════════════════════════════════════════════════════
-# BOT 1 — main.py  (Pyrogram — Quiz Creator Bot)
-# Send this to @BotFather → /setcommands → [select your creator bot]
-# ════════════════════════════════════════════════════════════════════════════
-
-start - Start the bot and see welcome message
-create - Create a new quiz
-sourcequiz - Create a quiz from a passage or study file
-createfromtext - Alias for sourcequiz
-sourcequizcancel - Cancel source-to-quiz mode
-done - Finish and save the current quiz
-cancel - Cancel quiz creation in progress
-list - List all your quizzes
-info - Get details about a quiz by ID
-edit - Edit an existing quiz
-delete - Delete a quiz by ID
-clone - Clone a quiz from a link
-extract - Extract quiz from a channel post or poll
-quiztxt - Create quiz from Drishti IAS or article URL
-help - Show all available commands
-features - View full feature list
-stats - Bot usage statistics (owner only)
-broadcast - Broadcast a message to all users (owner only)
-add - Authorize a user or group for paid quiz access
-rem - Remove authorization from a user or group
-ban - Ban a quiz by ID (owner only)
-check - Check system resource stats (owner only)
-cleanup - Emergency session cleanup (owner only)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# BOT 2 — bot.py  (PTB — Quiz Scheduler / Runner Bot)
-# Send this to @BotFather → /setcommands → [select your scheduler bot]
-# ════════════════════════════════════════════════════════════════════════════
-
-start - Start the scheduler bot
-quiz - Launch a quiz session in the group
-stop - Stop the running quiz
-pause - Pause the current quiz
+start - Start bot or open a quiz
+skip - Skip the current quiz question
+pause - Pause a running quiz
 resume - Resume a paused quiz
-skip - Skip the current question
-slow - Decrease quiz speed
-fast - Increase quiz speed
-normal - Reset quiz speed to normal
-leaderboard - Show current quiz leaderboard
+stop - Stop a running quiz
+slow - Slow down the quiz timer
+fast - Speed up the quiz timer
+normal - Restore the normal timer
 timer - Set exact per-question timer
+leaderboard - Show a quiz leaderboard
+help - Show all commands
+features - Show bot features
+create - Create a quiz
+done - Save the current quiz draft
+cancel - Cancel an active creator session
+sourcequiz - Create a quiz from source material
+sourcequizcancel - Cancel source-to-quiz mode
+myquizzes - List your quizzes
+info - Show quiz information
+edit - Edit an existing quiz
+stopedit - Close the quiz editor
+del - Delete one of your quizzes
+search - Search public quizzes
+setpromo - Set a promo message on your quizzes
+settings - Manage creator settings
+remove - Add words to your import filter
+mywords - List filtered words
+clearlist - Clear filtered words
+setkey - Save an AI provider key
+mykeys - List saved AI provider keys
+delkey - Delete an AI provider key
+add - Authorize a chat for paid quizzes
+rem - Remove a paid-quiz chat authorization
+remall - Clear paid-quiz chat authorizations
+pay - View premium plans
+auth - Grant premium access (owner/admin)
+removeuser - Revoke premium access (owner/admin)
+batch - List your quiz batches
+createbatch - Create a quiz batch
+searchbatch - Search public batches
+whtml - Export quiz as HTML report
+testseries - Generate a test-series PDF
+leaders - Show a quiz leaderboard
+aspirants - Alias for leaders
 pollquiz - Publish a timed poll quiz
 quizpoll - Alias for pollquiz
 publish - Alias for pollquiz
-pollsettings - Configure poll timer, anonymity and shuffling
-pollstop - Stop a running poll quiz
-schedule - Schedule a regular quiz or timed poll (HH:MM / 15m)
-viewschedule - View pending quiz and poll schedules
-myschedules - Alias for viewing pending schedules
+pollsettings - Configure timed poll defaults
+pollstop - Stop a timed poll quiz
+schedule - Schedule a quiz or timed poll
+viewschedule - View scheduled quizzes
+myschedules - View your schedules
 cancelschedule - Cancel a scheduled quiz
-result - Show your personal quiz result
-compare - Compare results with another user
-check - Show system health and stats
-cleanup - Force clean up stale sessions (owner only)
+aiquiz - Generate a quiz from a topic
+pdfquiz - Generate a quiz from a PDF
+mix - Combine existing quizzes
+html - Toggle HTML reports
+pdf - Toggle PDF reports
+trans - Translate quiz questions
+creatorstatus - Show creator migration status
+
+# Owner/admin commands
+statses - Show platform statistics
+testapi - Test database connectivity
+limit - Show current creator command limits
+gcast - Broadcast a replied-to message
+stopcast - Stop an active broadcast
+listquiz - List quizzes in the configured group
+ban - Ban a quiz creator and remove their quizzes
+convertall - Convert all paid quizzes to free
+delall - Delete every quiz (confirmation required)

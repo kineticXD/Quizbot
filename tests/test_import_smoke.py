@@ -6,7 +6,6 @@ import pytest
 
 # These are runtime dependencies, not optional test plugins. When the project
 # is installed from requirements.txt, all imports below should work cleanly.
-pytest.importorskip("pyrogram")
 pytest.importorskip("telegram")
 pytest.importorskip("pymongo")
 
@@ -16,10 +15,13 @@ pytest.importorskip("pymongo")
     [
         "quizbot.database.db",
         "quizbot.database.repositories",
-        "quizbot.creator_bot.bot",
-        "quizbot.creator_bot.handlers",
         "quizbot.runner_bot.bot",
         "quizbot.runner_bot.handlers",
+        "quizbot.runner_bot.handlers.creator",
+        "quizbot.runner_bot.handlers.creator_batches",
+        "quizbot.runner_bot.handlers.creator_reports",
+        "quizbot.runner_bot.handlers.creator_admin",
+        "quizbot.shared.quiz_file_import",
         "quizbot.mini_app.routes",
         "run",
     ],

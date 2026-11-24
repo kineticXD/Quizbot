@@ -63,7 +63,7 @@ def test_distinct_legacy_tokens_remain_available_for_existing_deployments(clean_
     assert loaded.BOT_TOKENS == ("123:creator-legacy", "456:runner-legacy")
 
 
-def test_runner_does_not_require_mtproto_api_credentials(clean_config, monkeypatch):
+def test_unified_bot_api_does_not_require_mtproto_api_credentials(clean_config, monkeypatch):
     monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017/test")
     monkeypatch.setenv("OWNER_ID", "42")
     monkeypatch.setenv("BOT_TOKEN", "123:single-token")
@@ -71,7 +71,7 @@ def test_runner_does_not_require_mtproto_api_credentials(clean_config, monkeypat
     loaded = importlib.reload(config)
 
     assert loaded.validate("runner") == []
-    assert any("API_ID / API_HASH" in item for item in loaded.validate("creator"))
+    assert not any("API_ID" in item or "API_HASH" in item for item in loaded.validate("creator"))
 
 
 def test_mini_app_only_requires_database_and_bot_token(clean_config, monkeypatch):

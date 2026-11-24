@@ -5,7 +5,6 @@
 **A production-grade Telegram quiz platform — create, manage, and run interactive quizzes at scale.**
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Pyrogram](https://img.shields.io/badge/Pyrogram-2.0-009485?logo=telegram)](https://pyrogram.org)
 [![PTB](https://img.shields.io/badge/python--telegram--bot-22.8-0088CC?logo=telegram)](https://python-telegram-bot.org)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47A248?logo=mongodb)](https://mongodb.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -31,8 +30,8 @@
 - [Quick Start](#-quick-start)
 - [Configuration Reference](#-configuration-reference)
 - [Running the Platform](#-running-the-platform)
-  - [Run Everything](#run-everything)
-  - [Run One Component Only](#run-one-component-only)
+  - [Run the Unified Bot](#run-the-unified-bot)
+  - [Mini App Only](#mini-app-only)
   - [systemd (VPS, always-on)](#systemd-vps-always-on)
 - [Docker Deployment](#-docker-deployment)
 - [Mini App — the Visual Quiz Player](#-mini-app--the-visual-quiz-player)
@@ -66,41 +65,23 @@
 
 ```
 quizbot/
-├── database/            Shared async MongoDB layer
-│   ├── db.py             Motor connection manager + automatic index setup
-│   └── repositories.py   One repository class per domain (users, quizzes, payments, ...)
-│
-├── shared/               Code shared by both bots
-│   ├── config.py          All configuration & secrets, loaded from .env
-│   ├── utils/             Text cleanup, premium checks, async file I/O
-│   └── html/              Quiz-report HTML generator (exam UI + analysis)
-│
-├── creator_bot/          Pyrogram bot — quiz creation, editing, batches, payments
-│   ├── bot.py             Client setup + run_creator_bot()
-│   └── handlers/          One module per feature area
-│
-├── runner_bot/           python-telegram-bot bot — playing quizzes, AI generation
-│   ├── bot.py             Application setup + run_runner_bot()
-│   └── handlers/          One module per feature area
-│
-└── mini_app/             FastAPI Mini App — the visual "Play" quiz player
-    ├── telegram_auth.py   Verifies Telegram WebApp initData (HMAC-SHA256)
-    ├── player_service.py  Play-session state, scoring, DB persistence
-    ├── routes.py          FastAPI app + /api/* endpoints
-    └── static/index.html  Single-file frontend (practice + exam mode UI)
+├── database/            Shared async MongoDB layer and repositories
+├── shared/              Configuration, parsers, timers, utilities and HTML reports
+├── runner_bot/          The single python-telegram-bot Bot API application
+│   ├── bot.py            Application setup and polling lifecycle
+│   └── handlers/         Quiz player, creator, editor, batches, reports, polls, payments
+├── creator_bot/         Shared legacy parsing/state/payment utilities; MTProto transport is inactive
+└── mini_app/            Optional FastAPI visual quiz player
 
-run.py                  Combined launcher — starts both bots (+ Mini App, if configured)
+run.py                  Single-client launcher (+ optional Mini App)
 requirements.txt
-Procfile                 Heroku process declaration (single web dyno)
-Dockerfile / docker-compose.yml
+Procfile / Dockerfile / docker-compose.yml
 .env.example             Environment variable template
 ```
 
-Everything runs from **one process** (`run.py`) by default, sharing a single async MongoDB database:
+The live deployment uses **one Telegram Bot API connection and one BotFather token**. The same application handles quiz creation, editing, imports, batch management, paid access, AI keys, reports, scheduling, timed polls, quiz playback and leaderboards. The old `creator_bot/bot.py` and Pyrogram handler transport are not started by the live launcher. Some transport-independent utilities (question parsing, shared state, source-question logic and payment helpers) are reused by the Bot API handlers. `API_ID` and `API_HASH` are not required.
 
-- **Creator Bot** (Pyrogram) handles quiz creation, editing, imports, batches, and payments.
-- **Runner Bot** (python-telegram-bot) handles quiz sessions — sending polls, tracking answers, building leaderboards.
-- **Mini App** (FastAPI, optional) serves a visual in-Telegram quiz player when a public domain is configured.
+The optional Mini App runs alongside the bot when `MINI_APP_DOMAIN` is configured. Both components use the same MongoDB database; quiz IDs and existing stored quizzes are preserved.
 
 ---
 
@@ -110,8 +91,7 @@ Everything runs from **one process** (`run.py`) by default, sharing a single asy
 |---|---|---|
 | Python | 3.11+ | |
 | MongoDB | Atlas free tier (M0) or self-hosted | `MONGODB_URI` in `.env` |
-| Telegram API credentials | — | From [my.telegram.org](https://my.telegram.org) |
-| Two Telegram bot tokens | — | same token for both runner and creator u can keep seperate too|
+| Telegram bot token | BotFather | One token from [@BotFather](https://t.me/BotFather) for all bot commands |
 
 ---
 
@@ -131,7 +111,7 @@ The database and all its indexes are created automatically on first connect — 
 
 ### Source-to-quiz and timed polls
 
-Use `/sourcequiz 10` (or `/createfromtext 10`) in the creator bot's private chat, then send a passage or upload a `.txt`, `.md`, `.csv`, `.pdf`, `.docx` or `.json` file. Exit with `/sourcequizcancel`. Formatted MCQs are parsed locally; passages use the shared AI-provider key system with strict source-evidence checks, followed by a conservative offline fact extractor if generation is unavailable. The resulting quiz is saved in the normal MongoDB quiz library and can be launched with either `/start QUIZ_ID` or `/pollquiz QUIZ_ID`.
+Use `/sourcequiz 10` (or `/createfromtext 10`) in the bot's private chat, then send a passage or upload a `.txt`, `.md`, `.csv`, `.pdf`, `.docx` or `.json` file. Exit with `/sourcequizcancel`. Formatted MCQs are parsed locally; passages use the shared AI-provider key system with strict source-evidence checks, followed by a conservative offline fact extractor if generation is unavailable. The resulting quiz is saved in the normal MongoDB quiz library and can be launched with either `/start QUIZ_ID` or `/pollquiz QUIZ_ID`.
 
 Use `/pollsettings` to save your default timed-poll duration, anonymity, question/option shuffling and leaderboard preference. An explicit `/pollquiz QUIZ_ID 30 public` setting overrides your default timer/anonymity for that run. Pending schedules are stored in MongoDB and restored after a restart. Use `/schedule QUIZ_ID 14:30` for the existing regular quiz scheduler, or `/schedule QUIZ_ID 15m` (also `2h` / `1d`) to publish a timed poll quiz later with your saved poll preferences. `/viewschedule` and `/myschedules` list both types; `/cancelschedule` accepts a schedule ID or quiz ID.
 
@@ -143,9 +123,9 @@ All values live in `.env` (copy from [`.env.example`](.env.example)). Note: you 
 
 | Variable | Required | Description |
 |---|---|---|
-| `API_ID` / `API_HASH` | ✅ | Telegram API credentials from [my.telegram.org](https://my.telegram.org) |
-| `CREATOR_BOT_TOKEN` | ✅ | Token for the Pyrogram bot (creation, editing, payments) |
-| `RUNNER_BOT_TOKEN` | ✅ | Token for the PTB bot (playing, scheduling, AI generation) |
+| `BOT_TOKEN` | ✅ | One BotFather token for all creator and quiz-player commands |
+| `API_ID` / `API_HASH` | — | Not required by the unified Bot API runtime; old values may remain in Render |
+| `CREATOR_BOT_TOKEN` / `RUNNER_BOT_TOKEN` | — | Legacy names only; set `BOT_TOKEN` for the unified deployment |
 | `MONGODB_URI` | ✅ | MongoDB Atlas connection string |
 | `MONGODB_DB_NAME` | ✅ | Database name (default: `quizbot`) |
 | `OWNER_ID` | ✅ | Your Telegram user ID |
@@ -167,21 +147,21 @@ Rate limits, session timeouts, and other tuning knobs have sensible defaults —
 
 ## 🚀 Running the Platform
 
-### Run Everything
+### Run the Unified Bot
 
 ```bash
 python run.py
 ```
 
-Starts both bots, and the Mini App server too if `MINI_APP_DOMAIN` is set.
+Starts the single Bot API application, and the optional Mini App server too when `MINI_APP_DOMAIN` is set. There is no `creator` or `runner` second-bot process.
 
-### Run One Component Only
+### Mini App Only
 
 ```bash
-python run.py --only creator   # Creator Bot only
-python run.py --only runner    # Runner Bot only
-python run.py --only miniapp   # Mini App server only
+python run.py --only miniapp
 ```
+
+This starts only the FastAPI Mini App. The normal Render, Docker and VPS deployment should use `python run.py`.
 
 ### systemd (VPS, always-on)
 
@@ -223,13 +203,7 @@ sudo journalctl -u quizbot -f      # live logs
 docker compose up -d --build
 ```
 
-This starts the Creator Bot, Runner Bot, and (if `MINI_APP_DOMAIN` is set) the Mini App as separate containers, each connecting out to the same MongoDB Atlas cluster via `MONGODB_URI` — no local volume needed, since nothing is stored on the container's own filesystem.
-
-To skip the Mini App entirely:
-
-```bash
-docker compose up -d --build creator-bot runner-bot
-```
+This starts the unified Bot API service (and the optional Mini App in the same process when configured), connecting to the same MongoDB Atlas cluster via `MONGODB_URI`. No MTProto session, Render Shell, or second bot service is required.
 
 **Heroku / other PaaS**: a single `Procfile` (`web: python run.py`) runs the whole platform from one dyno/process — set the same `.env` variables as Config Vars.
 
@@ -242,7 +216,7 @@ A "Play" button (opened as a Telegram WebApp) appears after quiz creation and on
 - **Practice mode** — instant correct/incorrect feedback with the explanation shown right after each answer, then auto-advance.
 - **Exam mode** — no answers revealed until the end, followed by a full top-to-bottom review of every question, your answer, the correct answer, and the explanation.
 
-It's strictly a player — no creation or editing happens here, and it enforces the same access rules as both bots (free/paid quizzes, batch access, auth-chat lists, optional premium gate).
+It's strictly a player — no creation or editing happens here, and it enforces the same access rules as the unified bot (free/paid quizzes, batch access, auth-chat lists, optional premium gate).
 
 Telegram requires a public HTTPS URL for WebApp buttons, so put a reverse proxy or tunnel (nginx, Caddy, Cloudflare Tunnel, etc.) in front of the FastAPI server and set `MINI_APP_DOMAIN` accordingly. Leave it blank to disable the feature entirely — no Play buttons are shown, and the server doesn't start.
 
@@ -252,7 +226,7 @@ Identity comes solely from Telegram's own `initData`, verified server-side via H
 
 ## 🗄 Database
 
-Data lives in MongoDB Atlas — a free M0 cluster is enough to get started (see [Quick Start](#-quick-start)). `quizbot/database/db.py` connects via Motor and creates every required index automatically on first connect, so there's no manual schema step. Both bots read and write through repository classes in `quizbot/database/repositories.py` — there's no separate API layer to keep in sync.
+Data lives in MongoDB Atlas — a free M0 cluster is enough to get started (see [Quick Start](#-quick-start)). `quizbot/database/db.py` connects via PyMongo's native async API and creates every required index automatically on first connect, so there's no manual schema step. All Bot API handlers read and write through repository classes in `quizbot/database/repositories.py` — there is no second creator process or duplicate polling connection to keep in sync.
 
 ---
 
@@ -264,7 +238,7 @@ Data lives in MongoDB Atlas — a free M0 cluster is enough to get started (see 
 |---|---|
 | **Originally developed by** | [devgagan](https://github.com/devgaganin) |
 | **Sponsored by** | [Qzio](https://qzio.in) — The Smart Quiz Platform |
-| **Telegram Libraries** | [Pyrogram](https://pyrogram.org) & [python-telegram-bot](https://python-telegram-bot.org) |
+| **Telegram Library** | [python-telegram-bot](https://python-telegram-bot.org) — Bot API |
 | **Database** | [MongoDB Atlas](https://mongodb.com) |
 
 ---
