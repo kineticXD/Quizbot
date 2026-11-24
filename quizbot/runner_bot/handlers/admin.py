@@ -17,7 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from quizbot.database import AuthChatRepository, QuizRepository, get_db
 from quizbot.shared import config
 
-from ..state import channel_poll_tasks, rate_limiter, session_mgr
+from ..state import channel_poll_tasks, pollquiz_controls, pollquiz_sessions, rate_limiter, session_mgr
 from ..telegram_utils import safe_send_message
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,11 @@ HELP_TEXT = (
     "/skip — skip the current question immediately (quiz owner in private; group admins)\n"
     "/pause, /resume, /stop — control the running quiz\n"
     "/slow, /fast, /normal — adjust the per-question timer\n"
-    "/timer &lt;seconds&gt; — set an exact timer for upcoming questions (10–3600)\n"
+    "/timer <seconds> — set an exact timer for upcoming questions (10–3600)\n"
     "/leaderboard — show a live leaderboard mid-quiz\n\n"
     "<b>Other quiz modes</b>\n"
-    "/pollquiz, /quizpoll, /publish &lt;quiz_id&gt; [minutes] [anonymous|public] — timed poll quiz\n"
-    "/pollsettings — set your default poll timer, anonymity, shuffling and leaderboard\n"
+    "/pollquiz, /quizpoll, /publish &lt;quiz_id&gt; — forwardable polls stay open until /pollstop\n"
+    "/pollsettings — set poll anonymity, shuffling and leaderboard preferences\n"
     "/skip closes the current poll during posting; /pollstop ends the whole run\n"
     "/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt; ... — combine quizzes\n"
     "/aiquiz &lt;topic&gt; — AI-generated quiz\n"
@@ -91,30 +91,28 @@ async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
             return
 
         if text.startswith("/pollstop"):
+            from .poll_quiz import finalize_pollquiz
             task = channel_poll_tasks.get(chat_id)
             if task and not task.done():
                 task.cancel()
-            else:
-                await safe_send_message(ctx, chat_id, "⚠️ No poll quiz is running.")
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if chat_id in pollquiz_sessions:
+                await finalize_pollquiz(ctx, chat_id)
+                pollquiz_sessions.pop(chat_id, None)
+                pollquiz_controls.pop(chat_id, None)
+            elif not task:
+                await safe_send_message(ctx, chat_id, "⚠️ No persistent poll quiz is active in this channel.")
             return
 
         if not text.startswith("/pollquiz"):
             return
 
         args = text.split()[1:]
-        if not args or len(args) > 2:
-            await safe_send_message(ctx, chat_id, "Usage: /pollquiz QUIZ_ID [minutes] (default: 60)")
-            return
-        from .poll_quiz import _resolve_auto_close_seconds, MAX_POLLQUIZ_MINUTES
-        try:
-            duration_seconds = (
-                int(args[1]) * 60 if len(args) == 2 else _resolve_auto_close_seconds()
-            )
-            if len(args) == 2 and not 1 <= int(args[1]) <= MAX_POLLQUIZ_MINUTES:
-                raise ValueError
-            _resolve_auto_close_seconds(duration_seconds)
-        except (TypeError, ValueError):
-            await safe_send_message(ctx, chat_id, f"Duration must be 1–{MAX_POLLQUIZ_MINUTES} minutes.")
+        if len(args) != 1:
+            await safe_send_message(ctx, chat_id, "Usage: /pollquiz QUIZ_ID\nPolls stay open indefinitely. Use /pollstop to close them.")
             return
 
         existing = channel_poll_tasks.get(chat_id)
@@ -150,7 +148,6 @@ async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         task = asyncio.create_task(
             run_channel_pollquiz(
                 ctx, chat_id, quiz, is_anonymous=True,
-                auto_close_seconds=duration_seconds,
             )
         )
         channel_poll_tasks[chat_id] = task
