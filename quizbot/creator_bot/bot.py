@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from typing import Any
 
 from pyrogram import Client
@@ -24,6 +26,70 @@ logger = logging.getLogger(__name__)
 # quiz-player adapter in the unified process.
 CREATOR_START_RETRY_BASE_SECONDS = 5
 CREATOR_START_RETRY_MAX_SECONDS = 60
+
+
+def _log_safe_config_diagnostics() -> None:
+    """Log credential shape/presence only; never print credential contents.
+
+    This is useful on hosts such as Render Free where an interactive shell is
+    unavailable and startup logs are the only practical diagnostic channel.
+    """
+    api_id = config.API_ID
+    api_hash = config.API_HASH or ""
+    token = config.CREATOR_BOT_TOKEN or ""
+
+    api_id_valid = isinstance(api_id, int) and not isinstance(api_id, bool) and api_id > 0
+    api_hash_hex = bool(re.fullmatch(r"[0-9a-fA-F]{32}", api_hash))
+    api_hash_has_whitespace = api_hash != api_hash.strip()
+    token_format_ok = (
+        token.count(":") == 1
+        and token.split(":", 1)[0].isdigit()
+        and bool(token.split(":", 1)[1])
+        and not any(character.isspace() for character in token)
+    )
+
+    logger.info(
+        "Creator MTProto config diagnostic (values hidden): "
+        "API_ID_present=%s API_ID_positive_integer=%s "
+        "API_HASH_present=%s API_HASH_length=%d API_HASH_32_hex=%s "
+        "API_HASH_has_outer_whitespace=%s BOT_TOKEN_present=%s "
+        "BOT_TOKEN_format_shape_ok=%s",
+        api_id is not None,
+        api_id_valid,
+        bool(api_hash),
+        len(api_hash),
+        api_hash_hex,
+        api_hash_has_whitespace,
+        bool(token),
+        token_format_ok,
+    )
+
+    primary_token = os.getenv("BOT_TOKEN")
+    legacy_creator_token = os.getenv("CREATOR_BOT_TOKEN")
+    legacy_runner_token = os.getenv("RUNNER_BOT_TOKEN")
+    if primary_token and (
+        (legacy_creator_token and legacy_creator_token != primary_token)
+        or (legacy_runner_token and legacy_runner_token != primary_token)
+    ):
+        logger.warning(
+            "Multiple bot-token environment variables differ. The unified config "
+            "prioritizes BOT_TOKEN for both adapters. Token values are hidden."
+        )
+
+    problems: list[str] = []
+    if not api_id_valid:
+        problems.append("API_ID must be a positive integer")
+    if not api_hash_hex:
+        problems.append("API_HASH should be the 32-character hexadecimal value from my.telegram.org")
+    if api_hash_has_whitespace:
+        problems.append("API_HASH has leading/trailing whitespace")
+    if not token_format_ok:
+        problems.append("BOT_TOKEN does not have the expected numeric-id:token format or contains whitespace")
+
+    if problems:
+        logger.error("Creator MTProto credential checks: %s", "; ".join(problems))
+    else:
+        logger.info("Creator MTProto credential format checks passed (credentials remain hidden).")
 
 
 def _is_transient_start_error(error: BaseException) -> bool:
@@ -85,6 +151,7 @@ async def run_creator_bot(stop_event: asyncio.Event | None = None) -> None:
     leave its internal session stopped. Handler registration remains local to
     each new Client instance.
     """
+    _log_safe_config_diagnostics()
     own_event = stop_event or asyncio.Event()
     attempt = 0
 
