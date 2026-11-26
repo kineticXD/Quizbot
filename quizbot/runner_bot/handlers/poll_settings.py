@@ -41,7 +41,11 @@ async def _show(update_or_query, user_id: int, settings: dict[str, Any], edit: b
         "♾️ <b>Poll lifetime: Unlimited</b>\n"
         "Polls do not have an automatic closing timer. They remain open until an administrator uses "
         "<code>/pollclose</code> or <code>/pollfinish</code>. Use <code>/pollstop</code> only to stop sending more questions. You can forward the polls to other chats.\n\n"
-        "Anonymous polls cannot produce individual scores. Telegram channels only support anonymous polls."
+        "Anonymous polls cannot produce individual scores. Telegram channels only support anonymous polls.\n\n"
+        "📌 <b>Forum topic destination</b>\n"
+        "Open the exact group topic and send <code>/polltarget</code> once. "
+        "Then /pollquiz will publish there even when started from the group's General chat or your private chat. "
+        "Use <code>/polltarget show</code> to view it or <code>/polltarget clear</code> to remove it."
     )
     markup = _keyboard(user_id, settings)
     if edit:

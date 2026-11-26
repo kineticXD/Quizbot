@@ -19,6 +19,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 from quizbot.database import AuthChatRepository, PollQuizSettingsRepository, QuizRepository, get_db
 from quizbot.shared.rich_quiz import RichDispatchResult, enrich_question_dispatch
+from quizbot.shared.poll_target import resolve_poll_destination
 from quizbot.shared.utils import is_premium_user
 
 from ..quiz_utils import shuffle_options_multi
@@ -258,6 +259,8 @@ async def run_channel_pollquiz(
         await asyncio.sleep(1.5)
 
         last_caselet_context = None
+        published_count = 0
+        failed_index: Optional[int] = None
         for idx, q in enumerate(questions):
             if asyncio.current_task().cancelled():
                 raise asyncio.CancelledError()
@@ -285,7 +288,17 @@ async def run_channel_pollquiz(
                 score_session=score_session, thread_id=thread_id,
                 skip_control=control,
             )
-            delay = poll_delay if sent else poll_delay + 2.0
+            if sent:
+                published_count += 1
+            else:
+                failed_index = idx
+                await safe_send_message(
+                    ctx, chat_id,
+                    "⚠️ Shikimori could not publish this poll. Check that the bot is allowed to send polls in this group/topic (Chat Permissions → Send Polls). The bot does not need administrator status when normal members are allowed to send polls.",
+                    thread_id=thread_id,
+                )
+                break
+            delay = poll_delay
             try:
                 await asyncio.wait_for(skip_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -308,7 +321,13 @@ async def run_channel_pollquiz(
             "skip_requested": False,
         })
         score_session["posting_complete"] = True
-        if collect_scores:
+        if published_count < total:
+            posted_message = (
+                f"⚠️ Published {published_count} of {total} polls. Publishing stopped at question "
+                f"{(failed_index + 1) if failed_index is not None else published_count + 1}. "
+                "Check the bot's Send Messages and Send Polls permissions in the selected topic."
+            )
+        elif collect_scores:
             posted_message = (
                 f"✅ All {total} questions are posted. Every poll remains open indefinitely. "
                 "Use /leaderboard for live standings. /pollstop stops further publishing; /pollclose closes polls; /pollfinish closes polls and posts final results."
@@ -514,35 +533,132 @@ async def _send_pollquiz_scoreboard(
     )
 
 
+async def polltarget_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set/show/clear the invoking user's default forum topic destination.
+
+    With no argument, call this command from inside the target forum topic.
+    A numeric thread ID may also be supplied while inside the target group.
+    """
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+
+    repo = PollQuizSettingsRepository(get_db())
+    args = list(ctx.args or [])
+    if args and args[0].lower() == "show":
+        settings = await repo.get(user.id)
+        target_chat = settings.get("poll_target_chat_id")
+        target_thread = settings.get("poll_target_thread_id")
+        if target_chat is None or target_thread is None:
+            text = (
+                "📌 <b>No poll topic is saved.</b>\n\n"
+                "Open the forum topic where you want Shikimori to publish, then send "
+                "<code>/polltarget</code> there."
+            )
+        else:
+            text = (
+                "📌 <b>Your saved poll destination</b>\n\n"
+                f"Group ID: <code>{int(target_chat)}</code>\n"
+                f"Topic ID: <code>{int(target_thread)}</code>\n\n"
+                "Use <code>/pollquiz QUIZ_ID</code> in this group or in your private chat with Shikimori."
+            )
+        await message.reply_text(text, parse_mode=ParseMode.HTML)
+        return
+
+    if args and args[0].lower() == "clear":
+        await repo.clear_topic_target(user.id)
+        await message.reply_text("✅ Your saved poll destination has been cleared.")
+        return
+
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.reply_text(
+            "Open the destination supergroup and run <code>/polltarget</code> "
+            "inside the topic you want to use. You can also pass a topic ID: "
+            "<code>/polltarget 123456</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not bool(getattr(message.chat, "is_forum", False)):
+        await message.reply_text("This group does not have forum topics enabled.")
+        return
+
+    thread_id: Optional[int] = None
+    if args:
+        if len(args) != 1:
+            await message.reply_text("Usage: /polltarget [topic_id|show|clear]")
+            return
+        try:
+            thread_id = int(args[0])
+        except ValueError:
+            await message.reply_text("Topic ID must be a positive integer. Or run /polltarget inside the target topic.")
+            return
+    else:
+        thread_id = getattr(message, "message_thread_id", None)
+
+    if thread_id is None or int(thread_id) <= 0:
+        await message.reply_text(
+            "I couldn't detect a forum topic from this message. Open the exact topic first, "
+            "then send <code>/polltarget</code>. Alternatively use <code>/polltarget TOPIC_ID</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await repo.set_topic_target(user.id, message.chat_id, int(thread_id))
+    await safe_send_message(
+        ctx, message.chat_id,
+        "📌 <b>Poll destination saved.</b>\n\n"
+        "Shikimori will publish the caselet passages and every poll in this topic. "
+        "You can now use <code>/pollquiz QUIZ_ID</code> from this group or from your private chat.",
+        parse_mode=ParseMode.HTML,
+        thread_id=int(thread_id),
+    )
+
+
 async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """`/pollquiz QUIZ_ID [anonymous|public]` -- publish permanent forwardable polls."""
-    chat_id = update.message.chat_id
+    message = update.effective_message
+    if message is None:
+        return
+    source_chat_id = message.chat_id
+    source_chat_type = message.chat.type
     try:
-        chat_type = update.message.chat.type
-        user_id = update.message.from_user.id if update.message.from_user else None
+        user_id = update.effective_user.id if update.effective_user else None
 
         try:
-            await ctx.bot.delete_message(chat_id, update.message.message_id)
+            await ctx.bot.delete_message(source_chat_id, message.message_id)
         except Exception:
+            # Bots do not need delete-message admin rights to publish polls.
             pass
 
         if not ctx.args or len(ctx.args) > 2:
             await safe_send_message(
-                ctx, chat_id,
+                ctx, source_chat_id,
                 "Usage: /pollquiz QUIZ_ID [anonymous|public]\n"
                 "Polls have no expiry timer. /pollstop stops publishing; /pollclose or /pollfinish closes published polls. "
                 "Use /pollsettings to configure anonymity and shuffling.",
             )
             return
 
+        settings_repo = PollQuizSettingsRepository(get_db()) if user_id else None
         settings = (
-            await PollQuizSettingsRepository(get_db()).get(user_id)
-            if user_id else {
+            await settings_repo.get(user_id)
+            if settings_repo else {
                 "anonymous": True, "shuffle_questions": False,
                 "shuffle_options": False, "scoreboard": False,
+                "poll_target_chat_id": None, "poll_target_thread_id": None,
             }
         )
-        is_channel = chat_type == ChatType.CHANNEL
+        current_thread_id = getattr(message, "message_thread_id", None)
+        chat_id, thread_id, target_source = resolve_poll_destination(
+            source_chat_id, source_chat_type, current_thread_id, settings,
+        )
+        if current_thread_id is not None and settings_repo is not None:
+            # Using /pollquiz from a topic automatically makes it the user's
+            # preferred destination for later runs started from General/DM.
+            await settings_repo.set_topic_target(user_id, source_chat_id, int(current_thread_id))
+        is_channel = source_chat_type == ChatType.CHANNEL
         is_anon = True if is_channel else bool(settings.get("anonymous", False))
         if len(ctx.args) == 2:
             requested_mode = str(ctx.args[1]).strip().lower()
@@ -550,42 +666,78 @@ async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 is_anon = True
             elif requested_mode in ("public", "scored"):
                 if is_channel:
-                    await safe_send_message(ctx, chat_id, "Channel polls are anonymous by Telegram design. Run this in a group for public polls and scores.")
+                    await safe_send_message(ctx, source_chat_id, "Channel polls are anonymous by Telegram design. Run this in a group for public polls and scores.")
                     return
                 is_anon = False
             else:
                 await safe_send_message(
-                    ctx, chat_id,
+                    ctx, source_chat_id,
                     "Timer arguments have been removed. Use /pollquiz QUIZ_ID or /pollquiz QUIZ_ID public.",
                 )
                 return
 
         if user_id and user_id != _ANON_ADMIN_ID and not await is_premium_user(user_id):
-            await safe_send_message(ctx, chat_id, "Please help us to make this project more valuable by purchasing premium! Thanks")
+            await safe_send_message(ctx, source_chat_id, "Please help us to make this project more valuable by purchasing premium! Thanks")
             return
 
         existing = channel_poll_tasks.get(chat_id)
         if existing and not existing.done():
-            await safe_send_message(ctx, chat_id, "⚠️ A poll quiz is already being published. Use /pollstop to stop sending new polls.")
+            await safe_send_message(ctx, source_chat_id, "⚠️ A poll quiz is already being published. Use /pollstop to stop sending new polls.")
             return
         previous = pollquiz_sessions.get(chat_id)
         if previous and not previous.get("finalized") and not previous.get("closed"):
-            await safe_send_message(ctx, chat_id, "⚠️ Previous polls are still open. Use /pollclose to close them without a leaderboard, or /pollfinish to close them and publish final results.")
+            await safe_send_message(ctx, source_chat_id, "⚠️ Previous polls are still open. Use /pollclose to close them without a leaderboard, or /pollfinish to close them and publish final results.")
             return
 
         qid = ctx.args[0]
         quiz_repo = QuizRepository(get_db())
         quiz = await quiz_repo.get(qid)
         if not quiz:
-            await safe_send_message(ctx, chat_id, "❌ Invalid QuestionSetID.")
+            await safe_send_message(ctx, source_chat_id, "❌ Invalid QuestionSetID.")
             return
 
         questions = quiz.get("questions", [])
         if not questions:
-            await safe_send_message(ctx, chat_id, "❌ Quiz has no questions.")
+            await safe_send_message(ctx, source_chat_id, "❌ Quiz has no questions.")
             return
 
-        thread_id = getattr(update.effective_message, "message_thread_id", None)
+        if (
+            bool(getattr(message.chat, "is_forum", False))
+            and source_chat_type in (ChatType.GROUP, ChatType.SUPERGROUP)
+            and current_thread_id is None
+            and target_source == "current_chat"
+        ):
+            await safe_send_message(
+                ctx, source_chat_id,
+                "📌 This group has forum topics, but no destination topic is selected.\n\n"
+                "Open the topic where you want the polls and send <code>/polltarget</code> there. "
+                "Then use <code>/pollquiz QUIZ_ID</code> from General or from your private chat with Shikimori.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        if chat_id != source_chat_id:
+            await safe_send_message(
+                ctx, source_chat_id,
+                f"📣 Publishing <b>{quiz.get('quiz_name', 'Quiz')}</b> in your saved forum topic.",
+                parse_mode=ParseMode.HTML,
+            )
+
+        # Preflight the actual destination. A bot does not need administrator
+        # status just to send messages/polls, but it must be a group member
+        # with permission to send messages in the selected topic.
+        destination_check = await safe_send_message(
+            ctx, chat_id,
+            "📌 Shikimori poll destination confirmed. Preparing your quiz…",
+            thread_id=thread_id,
+        )
+        if destination_check is None:
+            await safe_send_message(
+                ctx, source_chat_id,
+                "⚠️ I couldn't post in the selected group topic. Make sure Shikimori is a member of that group and has permission to send messages there. Administrator rights are not required for ordinary poll publishing.",
+            )
+            return
+
         task = asyncio.create_task(
             run_channel_pollquiz(
                 ctx, chat_id, quiz, is_anonymous=is_anon, thread_id=thread_id,
@@ -597,6 +749,32 @@ async def pollquiz_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYP
         channel_poll_tasks[chat_id] = task
     except Exception as e:
         logger.error("pollquiz_channel_command error: %s", e, exc_info=True)
+
+
+async def _resolve_poll_control_destination(update: Update) -> tuple[int, Optional[int]]:
+    """Resolve control commands to the same group/topic used by /pollquiz.
+
+    This lets an owner stop/close/finalize from the configured group, its
+    General chat, or a private chat with Shikimori.
+    """
+    message = update.effective_message
+    if message is None:
+        return 0, None
+    user = update.effective_user
+    current_thread = getattr(message, "message_thread_id", None)
+    active_session = pollquiz_sessions.get(int(message.chat_id))
+    if active_session and active_session.get("message_thread_id") is not None:
+        return int(message.chat_id), int(active_session["message_thread_id"])
+    if current_thread is not None:
+        return int(message.chat_id), int(current_thread)
+    if user:
+        settings = await PollQuizSettingsRepository(get_db()).get(user.id)
+        target_chat = settings.get("poll_target_chat_id")
+        target_thread = settings.get("poll_target_thread_id")
+        if target_chat is not None and target_thread is not None:
+            if message.chat.type == ChatType.PRIVATE or int(target_chat) == int(message.chat_id):
+                return int(target_chat), int(target_thread)
+    return int(message.chat_id), None
 
 
 async def _stop_poll_publisher(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int) -> tuple[bool, int]:
@@ -621,10 +799,10 @@ async def pollstop_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     message = update.effective_message
     if not message:
         return
-    chat_id = message.chat_id
+    chat_id, thread_id = await _resolve_poll_control_destination(update)
     try:
         try:
-            await ctx.bot.delete_message(chat_id, message.message_id)
+            await ctx.bot.delete_message(message.chat_id, message.message_id)
         except Exception:
             pass
         cancelled, posted = await _stop_poll_publisher(ctx, chat_id)
@@ -634,7 +812,7 @@ async def pollstop_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             text = f"ℹ️ Publishing has already finished or stopped. {posted} poll(s) remain open. Use /pollclose or /pollfinish when you are ready."
         else:
             text = "⚠️ No poll quiz is active in this chat."
-        await safe_send_message(ctx, chat_id, text, parse_mode=ParseMode.HTML)
+        await safe_send_message(ctx, chat_id, text, parse_mode=ParseMode.HTML, thread_id=thread_id)
     except Exception as e:
         logger.error("pollstop_command error: %s", e, exc_info=True)
 
@@ -644,16 +822,16 @@ async def pollclose_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     message = update.effective_message
     if not message:
         return
-    chat_id = message.chat_id
+    chat_id, thread_id = await _resolve_poll_control_destination(update)
     try:
         try:
-            await ctx.bot.delete_message(chat_id, message.message_id)
+            await ctx.bot.delete_message(message.chat_id, message.message_id)
         except Exception:
             pass
         await _stop_poll_publisher(ctx, chat_id)
         session = pollquiz_sessions.get(chat_id)
         if not session:
-            await safe_send_message(ctx, chat_id, "⚠️ There are no tracked poll quizzes to close.")
+            await safe_send_message(ctx, chat_id, "⚠️ There are no tracked poll quizzes to close.", thread_id=thread_id)
             return
         closed = 0
         for poll in session.get("polls", {}).values():
@@ -669,7 +847,7 @@ async def pollclose_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         session["finalized"] = True
         pollquiz_sessions.pop(chat_id, None)
         pollquiz_controls.pop(chat_id, None)
-        await safe_send_message(ctx, chat_id, f"🔒 Closed {closed} poll(s). No leaderboard was generated.")
+        await safe_send_message(ctx, chat_id, f"🔒 Closed {closed} poll(s). No leaderboard was generated.", thread_id=thread_id)
     except Exception as e:
         logger.error("pollclose_command error: %s", e, exc_info=True)
 
@@ -679,16 +857,16 @@ async def pollfinish_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     message = update.effective_message
     if not message:
         return
-    chat_id = message.chat_id
+    chat_id, thread_id = await _resolve_poll_control_destination(update)
     try:
         try:
-            await ctx.bot.delete_message(chat_id, message.message_id)
+            await ctx.bot.delete_message(message.chat_id, message.message_id)
         except Exception:
             pass
         await _stop_poll_publisher(ctx, chat_id)
         session = pollquiz_sessions.get(chat_id)
         if not session:
-            await safe_send_message(ctx, chat_id, "⚠️ There is no poll quiz available to finalize.")
+            await safe_send_message(ctx, chat_id, "⚠️ There is no poll quiz available to finalize.", thread_id=thread_id)
             return
         await finalize_pollquiz(ctx, chat_id)
         pollquiz_sessions.pop(chat_id, None)
@@ -713,6 +891,7 @@ async def check_channel_paid_access(quiz: dict, chat_id: int) -> Optional[str]:
 def register(application: Application) -> None:
     # Keep familiar aliases from the standalone poll studio.
     application.add_handler(CommandHandler(["pollquiz", "quizpoll", "publish"], pollquiz_channel_command))
+    application.add_handler(CommandHandler("polltarget", polltarget_command))
     application.add_handler(CommandHandler("pollstop", pollstop_command))
     application.add_handler(CommandHandler("pollclose", pollclose_command))
     application.add_handler(CommandHandler("pollfinish", pollfinish_command))

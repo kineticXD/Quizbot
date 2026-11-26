@@ -36,6 +36,7 @@ HELP_TEXT = (
     "/leaderboard — show live standings\n\n"
     "<b>Permanent poll quizzes</b>\n"
     "/pollquiz &lt;quiz_id&gt; [anonymous|public] — publish forwardable polls\n"
+    "/polltarget — save the current forum topic as poll destination\n"
     "/pollsettings — anonymity, shuffling and leaderboard preferences\n"
     "/skip — skip the current poll while publishing\n"
     "/pollstop — stop publishing; polls already sent stay open\n"
@@ -121,6 +122,8 @@ async def dashboard_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
             "📣 <b>Permanent poll publishing</b>\n\n"
             "Publish a saved quiz with:\n<code>/pollquiz QUIZ_ID</code>\n\n"
             "Polls are forwardable and have no expiry timer.\n"
+            "To choose a forum topic, open that topic and send <code>/polltarget</code> once. "
+            "Then /pollquiz can be started from General or your private chat.\n"
             "• /pollstop — stop sending new polls; sent polls stay open.\n"
             "• /pollclose — close sent polls without a leaderboard.\n"
             "• /pollfinish — close polls and publish final results.",

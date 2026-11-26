@@ -1009,14 +1009,17 @@ def _as_object_id(value: Any):
 
 
 class PollQuizSettingsRepository:
-    """Persistent personal defaults for timed /pollquiz runs."""
+    """Persistent personal defaults for no-expiry /pollquiz runs."""
 
     DEFAULTS = {
         "anonymous": False,
-        "timer_seconds": 0,  # 0 means use POLLQUIZ_AUTO_CLOSE_SECONDS.
         "shuffle_questions": False,
         "shuffle_options": False,
         "scoreboard": True,
+        # Personal default destination for forum-topic poll publishing.
+        # These are scoped to the user who configures /polltarget.
+        "poll_target_chat_id": None,
+        "poll_target_thread_id": None,
     }
     ALLOWED = frozenset(DEFAULTS)
 
@@ -1031,23 +1034,41 @@ class PollQuizSettingsRepository:
             await self.col.update_one({"user_id": int(user_id)}, {"$setOnInsert": doc}, upsert=True)
             row = await self.col.find_one({"user_id": int(user_id)}) or doc
         data = {**self.DEFAULTS, **_clean(row)}
+        # Drop legacy auto-close values so old Mongo rows cannot re-enable timers.
+        data.pop("timer_seconds", None)
         return data
 
     async def update(self, user_id: int, **fields) -> None:
         values = {key: value for key, value in fields.items() if key in self.ALLOWED}
         if not values:
             return
-        if "timer_seconds" in values:
-            timer = int(values["timer_seconds"])
-            if timer not in {0, 600, 1800, 3600, 10800, 43200, 86400}:
-                raise ValueError("Unsupported poll-quiz timer preset.")
-            values["timer_seconds"] = timer
         for key in ("anonymous", "shuffle_questions", "shuffle_options", "scoreboard"):
             if key in values:
                 values[key] = bool(values[key])
+        for key in ("poll_target_chat_id", "poll_target_thread_id"):
+            if key in values and values[key] is not None:
+                values[key] = int(values[key])
         values["updated_at"] = _now_iso()
         await self.get(user_id)
         await self.col.update_one({"user_id": int(user_id)}, {"$set": values}, upsert=True)
+
+    async def set_topic_target(self, user_id: int, chat_id: int, thread_id: int) -> None:
+        """Save a user's preferred forum topic for /pollquiz publishing."""
+        if int(thread_id) <= 0:
+            raise ValueError("thread_id must be a positive integer")
+        await self.update(
+            user_id,
+            poll_target_chat_id=int(chat_id),
+            poll_target_thread_id=int(thread_id),
+        )
+
+    async def clear_topic_target(self, user_id: int) -> None:
+        """Remove the user's saved poll destination."""
+        await self.update(
+            user_id,
+            poll_target_chat_id=None,
+            poll_target_thread_id=None,
+        )
 
 
 class ScheduledQuizRepository:
