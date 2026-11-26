@@ -1,81 +1,149 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
+"""Shikimori dashboard, help and channel-post command routing."""
 from __future__ import annotations
 
 import asyncio
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+    MessageHandler, filters,
+)
 
 from quizbot.database import AuthChatRepository, QuizRepository, get_db
 from quizbot.shared import config
-
-from ..state import channel_poll_tasks, pollquiz_controls, pollquiz_sessions, rate_limiter, session_mgr
+from ..state import channel_poll_tasks, rate_limiter, session_mgr
 from ..telegram_utils import safe_send_message
 
 logger = logging.getLogger(__name__)
 
+WELCOME_TEXT = (
+    "🌸 <b>Shikimori</b> — your quiz studio\n\n"
+    "Hi! I'm Shikimori. I can help you create quizzes, publish permanent "
+    "forwardable polls, manage your question library and track results.\n\n"
+    "Choose what you'd like to do below, or use /help to see every command."
+)
+
 HELP_TEXT = (
-    "\U0001F4D6 <b>Shikimori — Command Reference</b>\n\n"
-    "<b>Playing quizzes</b>\n"
-    "/start &lt;quiz_id&gt; [skip] — launch a quiz\n"
-    "/skip — skip the current question immediately (quiz owner in private; group admins)\n"
-    "/pause, /resume, /stop — control the running quiz\n"
-    "/slow, /fast, /normal — adjust the per-question timer\n"
-    "/timer <seconds> — set an exact timer for upcoming questions (10–3600)\n"
-    "/leaderboard — show a live leaderboard mid-quiz\n\n"
-    "<b>Other quiz modes</b>\n"
-    "/pollquiz, /quizpoll, /publish &lt;quiz_id&gt; — forwardable polls stay open until /pollstop\n"
-    "/pollsettings — set poll anonymity, shuffling and leaderboard preferences\n"
-    "/skip closes the current poll during posting; /pollstop ends the whole run\n"
-    "/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt; ... — combine quizzes\n"
-    "/aiquiz &lt;topic&gt; — AI-generated quiz\n"
-    "/pdfquiz — reply to a PDF to generate a quiz from it\n\n"
-    "<b>Reports &amp; settings</b>\n"
-    "/html, /pdf — toggle report generation for this chat\n"
-    "/trans &lt;lang&gt; — live question translation\n"
-    "/schedule QUIZ_ID HH:MM — regular quiz at an IST time\n"
-    "/schedule QUIZ_ID 15m — timed poll quiz after a delay\n"
-    "/viewschedule, /myschedules, /cancelschedule — manage schedules\n\n"
-    "<b>Quiz creation &amp; management</b>\n"
-    "/create — create a quiz; send a name, then questions; finish with /done\n"
-    "/done, /cancel — save or discard your draft\n"
-    "/sourcequiz [1–20], /sourcequizcancel — create questions from text/PDF/DOCX/TXT/JSON\n"
-    "/myquizzes [term], /info ID, /del ID, /search term\n"
-    "/edit ID — rename, adjust timer/type/marks, add or delete questions, promo and shuffle\n"
-    "/setpromo text, /add CHAT_ID, /rem CHAT_ID, /remall\n"
-    "/settings, /remove, /mywords, /clearlist\n"
-    "/setkey, /mykeys, /delkey — manage AI provider keys\n"
-    "/batch, /createbatch, /searchbatch — batch access and quiz grouping\n"
-    "/whtml QUIZ_ID, /testseries QID... — export reports\n"
-    "/pay — buy premium; /auth and /removeuser — owner/admin premium control\n"
-    "/creatorstatus — check unified Bot API creator status\n\n"
-    "<b>Owner utilities</b>\n"
-    "/statses, /testapi, /limit, /gcast, /stopcast, /listquiz, /ban, /convertall\n"
+    "🌸 <b>Shikimori — Command Guide</b>\n\n"
+    "<b>Quiz player</b>\n"
+    "/start &lt;quiz_id&gt; — open a quiz\n"
+    "/skip — skip the current question\n"
+    "/pause, /resume, /stop — control a running quiz\n"
+    "/slow, /fast, /normal — adjust quiz speed\n"
+    "/timer &lt;seconds&gt; — set a quiz timer\n"
+    "/leaderboard — show live standings\n\n"
+    "<b>Permanent poll quizzes</b>\n"
+    "/pollquiz &lt;quiz_id&gt; [anonymous|public] — publish forwardable polls\n"
+    "/pollsettings — anonymity, shuffling and leaderboard preferences\n"
+    "/skip — skip the current poll while publishing\n"
+    "/pollstop — stop publishing; polls already sent stay open\n"
+    "/pollclose — close sent polls without showing a leaderboard\n"
+    "/pollfinish — close polls and publish final results\n\n"
+    "<b>Create &amp; manage</b>\n"
+    "/create — create a quiz\n"
+    "/done, /cancel — save or discard a draft\n"
+    "/sourcequiz [1–20] — generate questions from source material\n"
+    "/myquizzes [search], /info &lt;id&gt;, /search &lt;term&gt;\n"
+    "/edit &lt;id&gt;, /del &lt;id&gt; — edit or delete a quiz\n"
+    "/batch, /createbatch, /searchbatch — batch tools\n"
+    "/mix, /aiquiz, /pdfquiz — additional quiz tools\n\n"
+    "<b>Settings &amp; reports</b>\n"
+    "/settings, /pollsettings, /setkey, /mykeys\n"
+    "/html, /pdf, /trans &lt;language&gt;\n"
+    "/schedule &lt;quiz_id&gt; HH:MM — schedule a regular quiz\n"
+    "/myschedules, /cancelschedule — manage schedules\n"
+    "/pay — premium plans\n"
+    "/creatorstatus — connection status\n\n"
+    "<b>Quick start</b>\n"
+    "1. Create a quiz with /create.\n"
+    "2. Save it and copy its Quiz ID.\n"
+    "3. Publish it with /pollquiz QUIZ_ID.\n"
+    "4. Use /pollstop, /pollclose or /pollfinish depending on what you need."
 )
 
 
+def dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✨ Create quiz", callback_data="shk:create"),
+         InlineKeyboardButton("📚 My library", callback_data="shk:library")],
+        [InlineKeyboardButton("📣 Publish polls", callback_data="shk:polls"),
+         InlineKeyboardButton("⚙️ Poll settings", callback_data="shk:pollsettings")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="shk:leaderboard"),
+         InlineKeyboardButton("❔ Help & guide", callback_data="shk:help")],
+        [InlineKeyboardButton("🔎 Creator status", callback_data="shk:status"),
+         InlineKeyboardButton("🏠 Home", callback_data="shk:home")],
+    ])
+
+
+async def dashboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text(WELCOME_TEXT, parse_mode=ParseMode.HTML, reply_markup=dashboard_keyboard())
+
+
 async def help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/help` -- command reference."""
-    await safe_send_message(ctx, update.effective_chat.id, HELP_TEXT, parse_mode=ParseMode.HTML)
+    message = update.effective_message
+    if message:
+        await message.reply_text(
+            HELP_TEXT, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Shikimori home", callback_data="shk:home")]]),
+        )
+
+
+async def dashboard_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    action = (query.data or "").split(":", 1)[-1]
+
+    if action == "home":
+        await query.edit_message_text(WELCOME_TEXT, parse_mode=ParseMode.HTML, reply_markup=dashboard_keyboard())
+        return
+    if action == "help":
+        await query.edit_message_text(HELP_TEXT, parse_mode=ParseMode.HTML, reply_markup=dashboard_keyboard())
+        return
+
+    # Feature handlers are imported lazily to keep module registration acyclic.
+    if action == "create":
+        from .creator import create_command
+        await create_command(update, ctx)
+    elif action == "library":
+        from .creator import myquizzes_command
+        await myquizzes_command(update, ctx)
+    elif action == "pollsettings":
+        from .poll_settings import pollsettings_command
+        await pollsettings_command(update, ctx)
+    elif action == "polls":
+        await query.message.reply_text(
+            "📣 <b>Permanent poll publishing</b>\n\n"
+            "Publish a saved quiz with:\n<code>/pollquiz QUIZ_ID</code>\n\n"
+            "Polls are forwardable and have no expiry timer.\n"
+            "• /pollstop — stop sending new polls; sent polls stay open.\n"
+            "• /pollclose — close sent polls without a leaderboard.\n"
+            "• /pollfinish — close polls and publish final results.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚙️ Poll settings", callback_data="shk:pollsettings")], [InlineKeyboardButton("🏠 Home", callback_data="shk:home")]]),
+        )
+    elif action == "leaderboard":
+        await query.message.reply_text("🏆 Use /leaderboard in the quiz group to view live standings, or /leaderboard QUIZ_ID for saved results.")
+    elif action == "status":
+        from .creator import creator_status_command
+        await creator_status_command(update, ctx)
 
 
 async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle `/pollquiz`, `/pollstop` and `/skip` sent as channel posts (these
-    arrive via `update.channel_post`, not `update.message`)."""
+    """Route channel-post commands using the same permanent-poll semantics."""
     from .poll_quiz import run_channel_pollquiz
-
     msg = update.channel_post
     if not msg:
         return
     text = (msg.text or "").strip()
+    if not text.startswith("/"):
+        return
+    command = text.split()[0].split("@", 1)[0].lower()
     chat_id = msg.chat_id
 
     try:
@@ -84,79 +152,59 @@ async def handle_channel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         pass
 
     try:
-        if text.startswith("/skip"):
+        if command == "/skip":
             from .poll_quiz import skip_active_pollquiz_question
             _ok, response = await skip_active_pollquiz_question(ctx, chat_id)
             await safe_send_message(ctx, chat_id, response)
             return
-
-        if text.startswith("/pollstop"):
-            from .poll_quiz import finalize_pollquiz
-            task = channel_poll_tasks.get(chat_id)
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            if chat_id in pollquiz_sessions:
-                await finalize_pollquiz(ctx, chat_id)
-                pollquiz_sessions.pop(chat_id, None)
-                pollquiz_controls.pop(chat_id, None)
-            elif not task:
-                await safe_send_message(ctx, chat_id, "⚠️ No persistent poll quiz is active in this channel.")
+        if command == "/pollstop":
+            from .poll_quiz import _stop_poll_publisher
+            cancelled, posted = await _stop_poll_publisher(ctx, chat_id)
+            await safe_send_message(ctx, chat_id, f"⏸ Poll publishing stopped. {posted} sent poll(s) remain open. Use /pollclose or /pollfinish when ready.")
             return
-
-        if not text.startswith("/pollquiz"):
+        if command in {"/pollclose", "/pollfinish"}:
+            from .poll_quiz import pollclose_command, pollfinish_command
+            if command == "/pollclose":
+                await pollclose_command(update, ctx)
+            else:
+                await pollfinish_command(update, ctx)
+            return
+        if command not in {"/pollquiz", "/quizpoll", "/publish"}:
             return
 
         args = text.split()[1:]
-        if len(args) != 1:
-            await safe_send_message(ctx, chat_id, "Usage: /pollquiz QUIZ_ID\nPolls stay open indefinitely. Use /pollstop to close them.")
+        if not args or len(args) > 2:
+            await safe_send_message(ctx, chat_id, "Usage: /pollquiz QUIZ_ID. Polls are permanent and forwardable.")
+            return
+        qid = args[0]
+        is_anonymous = True
+        if len(args) == 2 and args[1].lower() in {"public", "scored"}:
+            await safe_send_message(ctx, chat_id, "Channel polls are anonymous by Telegram design; public scoring is available in groups.")
+            return
+        if len(args) == 2 and args[1].lower() not in {"anonymous", "anon"}:
+            await safe_send_message(ctx, chat_id, "Timer arguments are no longer supported. Use /pollquiz QUIZ_ID.")
             return
 
         existing = channel_poll_tasks.get(chat_id)
         if existing and not existing.done():
-            await safe_send_message(ctx, chat_id, "⚠️ A poll quiz is already running. Use /pollstop to stop it.")
+            await safe_send_message(ctx, chat_id, "⚠️ A poll quiz is already being published here.")
             return
-
-        qid = args[0]
-        quiz_repo = QuizRepository(get_db())
-        quiz = await quiz_repo.get(qid)
+        quiz = await QuizRepository(get_db()).get(qid)
         if not quiz:
-            await safe_send_message(ctx, chat_id, "❌ Invalid QuestionSetID.")
+            await safe_send_message(ctx, chat_id, "❌ Quiz ID not found.")
             return
-
-        creator_id = quiz.get("creator_id")
-        if quiz.get("quiz_type") == "paid" and creator_id:
-            auth_repo = AuthChatRepository(get_db())
-            auth_users = await auth_repo.get(creator_id)
-            if chat_id not in auth_users:
-                try:
-                    cinfo = await ctx.bot.get_chat(creator_id)
-                    details = f"\U0001F464 {cinfo.first_name or ''}\n\U0001F4AC @{cinfo.username or 'N/A'}\n\U0001F522 ID: {cinfo.id}"
-                    await safe_send_message(ctx, chat_id, f"❌ This is a paid quiz. Contact creator for access.\n\n{details}")
-                except Exception:
-                    await safe_send_message(ctx, chat_id, f"❌ Paid quiz. Contact creator ID {creator_id} for access.")
+        if quiz.get("quiz_type") == "paid" and quiz.get("creator_id"):
+            allowed = await AuthChatRepository(get_db()).get(quiz["creator_id"])
+            if chat_id not in allowed:
+                await safe_send_message(ctx, chat_id, "🔒 This paid quiz is not authorised for this channel.")
                 return
-
-        questions = quiz.get("questions", [])
-        if not questions:
-            await safe_send_message(ctx, chat_id, "❌ Quiz has no questions.")
-            return
-
-        task = asyncio.create_task(
-            run_channel_pollquiz(
-                ctx, chat_id, quiz, is_anonymous=True,
-            )
-        )
+        task = asyncio.create_task(run_channel_pollquiz(ctx, chat_id, quiz, is_anonymous=is_anonymous))
         channel_poll_tasks[chat_id] = task
-    except Exception as e:
-        logger.error("handle_channel_command error: %s", e, exc_info=True)
+    except Exception:
+        logger.exception("Channel command routing failed for %s", command)
 
 
 async def watchdog_loop() -> None:
-    """Periodically clean up expired quiz sessions and rate-limiter buckets."""
     while True:
         try:
             await asyncio.sleep(config.WATCHDOG_INTERVAL)
@@ -164,11 +212,12 @@ async def watchdog_loop() -> None:
             rate_limiter.cleanup()
         except asyncio.CancelledError:
             return
-        except Exception as e:
-            logger.error("Watchdog error: %s", e)
+        except Exception:
+            logger.exception("Watchdog error")
 
 
 def register(application: Application) -> None:
-    # All command help and channel command routing run on this one Bot API client.
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler(["menu", "home"], dashboard_command))
+    application.add_handler(CallbackQueryHandler(dashboard_callback, pattern=r"^shk:"))
     application.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.CHANNEL, handle_channel_command))

@@ -1220,13 +1220,15 @@ async def start_quiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         await handle_payment_deeplink(update, ctx, args[0][4:])
         return
     if not args:
+        from .admin import dashboard_keyboard
         await safe_send_message(
             ctx,
             chat.id,
-            "<b>Welcome to Advance Quizbot!</b>\n\n"
-            "Create quizzes with /create, or open a shared quiz using /start QUIZ_ID.\n"
-            "Use /help to see all available commands.",
+            "🌸 <b>Welcome to Shikimori!</b>\n\n"
+            "I'm Shikimori, your quiz studio. Create and manage quizzes, publish permanent forwardable polls, and follow results from one place.\n\n"
+            "Choose an action below or use /help for the full command guide.",
             parse_mode=ParseMode.HTML,
+            reply_markup=dashboard_keyboard(),
         )
         return
 

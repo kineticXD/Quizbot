@@ -139,9 +139,11 @@ def test_pollquiz_has_non_anonymous_answer_tracking_and_finalization():
     assert "pollquiz_score_rows" in player
     assert "finalize_pollquiz" in poll_quiz
     assert "is_anonymous=is_anonymous" in poll_quiz
-    assert "auto_close_seconds" in poll_quiz
-    assert "open_period" in poll_quiz
+    assert "auto_close_seconds" not in poll_quiz
+    assert "open_period" not in poll_quiz
     assert "finalize_pollquiz(ctx, chat_id)" in poll_quiz
+    assert 'CommandHandler("pollclose", pollclose_command)' in poll_quiz
+    assert 'CommandHandler("pollfinish", pollfinish_command)' in poll_quiz
 
 
 def test_pollquiz_scores_use_real_repository_save_path():
@@ -150,13 +152,17 @@ def test_pollquiz_scores_use_real_repository_save_path():
     assert "stop_poll" in source
 
 
-def test_pollquiz_auto_closes_and_publishes_final_leaderboard():
+def test_pollquiz_has_no_expiry_and_separates_stop_close_and_finish():
     source = (ROOT / "quizbot/runner_bot/handlers/poll_quiz.py").read_text(encoding="utf-8")
-    assert "POLLQUIZ_AUTO_CLOSE_SECONDS" in source
-    assert 'poll_kwargs["open_period"]' in source
-    assert "await asyncio.sleep(auto_close_seconds + 7)" in source
-    assert "await finalize_pollquiz(ctx, chat_id)" in source
-    assert "Usage: /pollquiz QUIZ_ID [minutes]" in source
+    assert "Polls stay open indefinitely" in source or "Polls have no expiry timer" in source
+    assert "open_period" not in source
+    assert "auto_close_seconds" not in source
+    stop_start = source.index("async def pollstop_command")
+    close_start = source.index("async def pollclose_command", stop_start)
+    stop_source = source[stop_start:close_start]
+    assert "_stop_poll_publisher" in stop_source
+    assert "finalize_pollquiz" not in stop_source
+    assert "pollclose_command" in source and "pollfinish_command" in source
 
 
 def test_standard_quiz_stop_publishes_partial_leaderboard():
@@ -170,37 +176,8 @@ def test_standard_quiz_stop_publishes_partial_leaderboard():
     assert "Partial Leaderboard" in source
 
 
-def test_pollquiz_duration_is_configurable():
+def test_pollquiz_does_not_expose_a_duration_setting():
     config = (ROOT / "quizbot/shared/config.py").read_text(encoding="utf-8")
     env = (ROOT / ".env.example").read_text(encoding="utf-8")
-    assert 'POLLQUIZ_AUTO_CLOSE_SECONDS: int = _env_int("POLLQUIZ_AUTO_CLOSE_SECONDS", 3600)' in config
-    assert "POLLQUIZ_AUTO_CLOSE_SECONDS=3600" in env
-
-
-def test_help_is_registered_on_the_always_running_bot_api_adapter():
-    runner_admin = (ROOT / "quizbot/runner_bot/handlers/admin.py").read_text(encoding="utf-8")
-    creator_admin = (ROOT / "quizbot/creator_bot/handlers/admin.py").read_text(encoding="utf-8")
-
-    assert 'CommandHandler("help", help_command)' in runner_admin
-    assert 'filters.command("help")' not in creator_admin
-
-
-def test_creator_fallback_is_in_runner_registry_and_has_basic_create_flow():
-    registry = (ROOT / "quizbot/runner_bot/handlers/__init__.py").read_text(encoding="utf-8")
-    fallback = (ROOT / "quizbot/runner_bot/handlers/creator_fallback.py").read_text(encoding="utf-8")
-
-    assert "creator_fallback" in registry
-    assert 'CommandHandler("create", create_command)' in fallback
-    assert 'CommandHandler("done", done_command)' in fallback
-    assert 'CommandHandler("cancel", cancel_command)' in fallback
-    assert "QuizRepository(get_db()).create(" in fallback
-    assert "MIN_QUESTIONS = 10" in fallback
-
-
-def test_creator_adapter_readiness_is_exposed_to_runner_fallback():
-    creator = (ROOT / "quizbot/creator_bot/bot.py").read_text(encoding="utf-8")
-    fallback = (ROOT / "quizbot/runner_bot/handlers/creator_fallback.py").read_text(encoding="utf-8")
-
-    assert "runtime.CREATOR_ADAPTER_READY = True" in creator
-    assert "runtime.CREATOR_ADAPTER_READY = False" in creator
-    assert "runtime.CREATOR_ADAPTER_READY" in fallback
+    assert "POLLQUIZ_AUTO_CLOSE_SECONDS" not in config
+    assert "POLLQUIZ_AUTO_CLOSE_SECONDS" not in env

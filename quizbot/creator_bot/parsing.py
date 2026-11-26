@@ -113,6 +113,10 @@ _QUESTION_STARTS = (
     "according to ", "based on ", "from the passage", "the passage suggests",
     "it can be inferred", "which of ", "what can be inferred",
     "select ", "choose ", "identify ", "the author", "the main idea",
+    "the ratio ", "the number ", "the proportion ", "what percentage",
+    "what fraction", "which percentage", "students taking ",
+    "aspirants taking ", "those attending ", "those taking ",
+    "attendees taking ", "the percentage ", "the fraction ",
 )
 
 def _is_question_prompt_line(line: str) -> bool:
@@ -227,8 +231,13 @@ def split_question_blocks(text: str) -> list[str]:
 
 
 def parse_question_block(blk: str) -> Optional[dict]:
-    """Parse one question block (separated by a blank line in a larger
-    paste) into {question, options, correct_option_id, explanation}.
+    """Parse one question block into a question plus optional shared context.
+
+    A CLAT-style passage/caselet is returned once as ``context`` instead of
+    being copied into every question's stem. ``_inherit_shared_passage`` may
+    prepend the active passage to later blocks before this function is called;
+    this function extracts that prefix again so each saved question has a
+    clean, individual prompt.
 
     `correct_option_id` is an int (single ✅) or a list[int] (multiple ✅).
     Returns None if the block doesn't parse into a valid question.
@@ -240,6 +249,14 @@ def parse_question_block(blk: str) -> Optional[dict]:
     purpose for spacing within the question itself.
     """
     blk = clean_markdown(blk)
+    context = _extract_shared_passage(blk)
+    if context:
+        # The parser's splitter temporarily inherits the active caselet into
+        # each block so that older import formats keep their context. Store it
+        # in its own field and leave only the individual prompt in question.
+        prefix = context
+        if blk.startswith(prefix):
+            blk = blk[len(prefix):].lstrip("\n")
     # Keep blank lines here (structure-preserving) -- they're only used
     # for splitting on the caller side (blocks separated by "\n\n"); a
     # blank line *inside* one block is an intentional paragraph break in
@@ -318,6 +335,7 @@ def parse_question_block(blk: str) -> Optional[dict]:
     coid = coids[0] if len(coids) == 1 else coids
     return {
         "question": question,
+        "context": context or None,
         "options": opts,
         "correct_option_id": coid,
         "explanation": exp,

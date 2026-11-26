@@ -378,7 +378,7 @@ async def _save_created_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE,
         f"📢 Promo: <b>{'Set' if session.get('promo_message') else 'Not set'}</b>\n"
         f"📚 Sections: <b>{len(session.get('sections', []))}</b>\n"
         f"🆔 Quiz ID: <code>{qid}</code>\n\n"
-        f"Use <code>/start {qid}</code> for a normal quiz or <code>/pollquiz {qid}</code> for timed Telegram polls.",
+        f"Use <code>/start {qid}</code> for a normal quiz or <code>/pollquiz {qid}</code> for permanent, forwardable polls.",
         parse_mode=ParseMode.HTML,
         reply_markup=result_keyboard,
         disable_web_page_preview=True,
@@ -617,6 +617,8 @@ async def handle_creation_message(update: Update, context: ContextTypes.DEFAULT_
             )
             return
         parsed["question"] = strip_source_noise(filter_words(parsed.get("question"), remove_words))
+        if parsed.get("context"):
+            parsed["context"] = strip_source_noise(filter_words(parsed.get("context"), remove_words))
         parsed["options"] = [filter_words(option, remove_words) or "" for option in parsed.get("options", [])]
         parsed_questions.append(parsed)
     if not parsed_questions:
@@ -1337,7 +1339,8 @@ def _normalize_source_questions(items: list[dict], remove_words: list[str]) -> l
                 "options": options,
                 "correct_option_id": indices[0] if len(indices) == 1 else indices,
                 "explanation": explanation or None,
-                "reply_text": context or None,
+                "context": strip_source_noise(filter_words(context, remove_words)).strip() if context else None,
+                "reply_text": item.get("reply_text") or None,
                 "file_id": item.get("file_id"),
             })
         except (TypeError, ValueError, AttributeError):
@@ -1691,7 +1694,7 @@ async def creator_status_command(update: Update, context: ContextTypes.DEFAULT_T
     if message:
         await message.reply_text(
             "✅ Unified Bot API creator is running; the legacy MTProto adapter is intentionally disabled.\n"
-            "Quiz creation, editing, source imports, quiz library, settings, AI keys, paid access, batches, reports, scheduling, timed polls and playback all use this single connection.\n"
+            "Quiz creation, editing, source imports, quiz library, settings, AI keys, paid access, batches, reports, scheduling, permanent forwardable polls and playback all use this single connection.\n"
             "Use /help for the available commands."
         )
 

@@ -15,7 +15,7 @@ _MODULES = (
     quiz_play,     # /start, /skip, /pause, /resume, /stop, /leaderboard, timer controls, poll answers
     setup_wizard,  # qs_* quiz-setup wizard callbacks
     poll_quiz,     # /pollquiz, /pollstop
-    poll_settings, # /pollsettings per-user timed-poll defaults
+    poll_settings, # /pollsettings per-user permanent-poll preferences
     mix,           # /mix
     ai_quiz,       # /aiquiz
     pdf_quiz,      # /pdfquiz

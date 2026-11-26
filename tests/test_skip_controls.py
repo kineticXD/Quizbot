@@ -92,7 +92,7 @@ def test_skip_active_pollquiz_rejects_when_question_posting_is_complete():
         try:
             ok, message = await helper(SimpleNamespace(bot=Bot()), chat_id)
             assert ok is False
-            assert "Use /pollstop" in message
+            assert "Use /pollclose" in message
             assert closed == []
             assert not event.is_set()
         finally:

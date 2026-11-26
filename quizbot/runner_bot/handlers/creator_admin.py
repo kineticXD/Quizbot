@@ -27,7 +27,7 @@ FEATURES_TEXT = (
     "• Import Telegram quiz polls, TXT/JSON banks and source documents\n"
     "• Generate questions from passages using saved AI providers\n"
     "• Run standard quizzes and timed group poll quizzes\n"
-    "• Schedule quizzes and timed polls\n"
+    "• Schedule quizzes and permanent poll quizzes\n"
     "• Share quizzes through inline mode and deep links\n"
     "• Manage paid access, batches, premium plans and reports\n\n"
     "Use /help to see commands."

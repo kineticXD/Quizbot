@@ -136,10 +136,11 @@ class ScheduledQuizManager:
             run_at = datetime.fromtimestamp(float(record["run_at"]), tz=timezone.utc).astimezone(IST)
             if record.get("run_mode") == "poll":
                 from .poll_quiz import run_channel_pollquiz
-                from ..state import channel_poll_tasks, session_mgr
+                from ..state import channel_poll_tasks, pollquiz_sessions, session_mgr
 
                 current_task = channel_poll_tasks.get(chat_id)
-                if (current_task and not current_task.done()) or session_mgr.get(chat_id):
+                previous_poll_session = pollquiz_sessions.get(chat_id)
+                if (current_task and not current_task.done()) or session_mgr.get(chat_id) or (previous_poll_session and not previous_poll_session.get("closed") and not previous_poll_session.get("finalized")):
                     await safe_send_message(
                         ctx, chat_id,
                         f"⚠️ Scheduled poll quiz {qid} was not started because another quiz is active in this chat.",
@@ -148,23 +149,20 @@ class ScheduledQuizManager:
                     return
 
                 poll_settings = record.get("poll_settings") or {}
-                timer_seconds = int(poll_settings.get("timer_seconds", 0) or 0)
                 task = asyncio.create_task(run_channel_pollquiz(
                     ctx, chat_id, quiz,
                     is_anonymous=bool(poll_settings.get("anonymous", False)),
                     thread_id=thread_id,
-                    auto_close_seconds=timer_seconds or None,
                     shuffle_questions=bool(poll_settings.get("shuffle_questions", False)),
                     shuffle_options=bool(poll_settings.get("shuffle_options", False)),
                     publish_scoreboard=bool(poll_settings.get("scoreboard", True)),
                 ))
                 channel_poll_tasks[chat_id] = task
-                timer_label = f"{timer_seconds // 60} min" if timer_seconds else "global default"
                 await safe_send_message(
                     ctx, chat_id,
-                    f"📣 <b>Scheduled poll quiz is starting!</b>\n\n"
+                    f"📣 <b>Scheduled persistent poll quiz is starting!</b>\n\n"
                     f"Quiz: <b>{quiz.get('quiz_name', 'Quiz')}</b> (<code>{qid}</code>)\n"
-                    f"Poll auto-close: <b>{timer_label}</b>",
+                    "Polls have no expiry timer. Use /pollstop to stop further publishing, /pollclose to close polls, or /pollfinish to close them and publish final results.",
                     parse_mode=ParseMode.HTML, thread_id=thread_id,
                 )
                 return
@@ -234,7 +232,7 @@ def init_schedule_manager(scheduler: AsyncIOScheduler, application) -> Scheduled
 
 
 async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """`/schedule ID HH:MM` for a regular quiz or `/schedule ID 15m` for a timed poll."""
+    """`/schedule ID HH:MM` for a regular quiz or `/schedule ID 15m` for a persistent poll."""
     chat_id = update.message.chat_id
     try:
         user_id = update.message.from_user.id
@@ -259,7 +257,7 @@ async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
                 ctx, chat_id,
                 "📅 <b>Usage</b>\n"
                 "• <code>/schedule QUIZ_ID 14:30</code> — regular quiz at that IST time\n"
-                "• <code>/schedule QUIZ_ID 15m</code> — timed poll quiz in 15 minutes\n"
+                "• <code>/schedule QUIZ_ID 15m</code> — persistent poll quiz in 15 minutes\n"
                 "Relative poll delays: 1m–30d (examples: 45m, 2h, 1d).",
                 parse_mode=ParseMode.HTML,
             )
@@ -289,22 +287,11 @@ async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         if run_mode == "poll":
             settings = await PollQuizSettingsRepository(get_db()).get(user_id)
             poll_settings = {
-                "timer_seconds": int(settings.get("timer_seconds", 0) or 0),
                 "anonymous": bool(settings.get("anonymous", False)),
                 "shuffle_questions": bool(settings.get("shuffle_questions", False)),
                 "shuffle_options": bool(settings.get("shuffle_options", False)),
                 "scoreboard": bool(settings.get("scoreboard", True)),
             }
-            if poll_settings["timer_seconds"]:
-                from .poll_quiz import _resolve_auto_close_seconds
-                try:
-                    poll_settings["timer_seconds"] = _resolve_auto_close_seconds(
-                        poll_settings["timer_seconds"], len(quiz["questions"]),
-                    )
-                except ValueError as exc:
-                    await safe_send_message(ctx, chat_id, f"❌ Saved poll timer cannot be used for this quiz: {exc}")
-                    return
-
         thread_id = getattr(update.effective_message, "message_thread_id", None)
         schedule_id = await schedule_mgr.add(
             chat_id, qid, sched_time, user_id, ctx, thread_id=thread_id,
@@ -316,17 +303,14 @@ async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         hours, remainder = divmod(remainder, 3600)
         minutes, _ = divmod(remainder, 60)
         eta = " ".join(part for value, unit in ((days, "d"), (hours, "h"), (minutes, "m")) if value and (part := f"{value}{unit}")) or "less than a minute"
-        mode_label = "Timed poll quiz" if run_mode == "poll" else "Regular quiz"
-        details = (
-            f"\n⏱ Poll auto-close: {poll_settings['timer_seconds'] // 60} min" if run_mode == "poll" and poll_settings["timer_seconds"]
-            else "\n⏱ Poll auto-close: global default" if run_mode == "poll" else ""
-        )
+        mode_label = "Persistent poll quiz" if run_mode == "poll" else "Regular quiz"
         await safe_send_message(
             ctx, chat_id,
             f"✅ <b>{mode_label} scheduled!</b>\n\n"
             f"📘 {quiz.get('quiz_name', 'Quiz')} (<code>{qid}</code>)\n"
             f"🆔 Schedule: <code>{schedule_id}</code>\n"
-            f"🕒 {sched_time.strftime('%I:%M %p, %d %b')} IST · in {eta}{details}",
+            f"🕒 {sched_time.strftime('%I:%M %p, %d %b')} IST · in {eta}"
+            + ("\n♾️ Polls have no expiry timer. /pollstop stops publishing; /pollclose or /pollfinish closes them." if run_mode == "poll" else ""),
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
@@ -362,16 +346,10 @@ async def viewschedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             else:
                 until = "starting soon"
 
-            mode = "Timed poll" if item.get("run_mode") == "poll" else "Regular quiz"
-            poll_settings = item.get("poll_settings") or {}
-            timer = int(poll_settings.get("timer_seconds", 0) or 0)
-            timer_label = (
-                f" · poll timer {timer // 60}m" if item.get("run_mode") == "poll" and timer
-                else " · global poll timer" if item.get("run_mode") == "poll" else ""
-            )
+            mode = "Persistent polls" if item.get("run_mode") == "poll" else "Regular quiz"
             text += (
                 f"{index}. <b>{mode}</b> · <code>{item['quiz_id']}</code>\n"
-                f"   🕒 {item['scheduled_time'].strftime('%I:%M %p, %d %b')} IST (in {until}){timer_label}\n"
+                f"   🕒 {item['scheduled_time'].strftime('%I:%M %p, %d %b')} IST (in {until})\n"
                 f"   🆔 <code>{item['job_id']}</code>\n\n"
             )
         text += "Cancel with <code>/cancelschedule SCHEDULE_ID</code>."
