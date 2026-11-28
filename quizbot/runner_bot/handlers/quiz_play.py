@@ -620,6 +620,7 @@ async def run_group_quiz(
         return
     except Exception as e:
         logger.error("run_group_quiz fatal error chat=%s: %s", chat_id, e, exc_info=True)
+        await session_mgr.delete(chat_id)
         await safe_send_message(ctx, chat_id, f"❌ Quiz error: {e}")
 
 
@@ -1100,11 +1101,9 @@ async def _end_group_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, update: 
                 chat_title=chat_title, protect_type=False, thread_id=thread_id,
             )
             if not persisted:
-                # Preserve the session so /stop can retry persistence without
-                # duplicating the already-published leaderboard.
-                s["finalizing"] = False
-                return
-            s["leaderboard_persisted"] = True
+                logger.warning("Persistence failed for quiz in chat=%s; releasing session", chat_id)
+            else:
+                s["leaderboard_persisted"] = True
 
         await session_mgr.delete(chat_id)
     except Exception as exc:
@@ -1242,9 +1241,10 @@ async def start_quiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         await safe_send_message(ctx, chat.id, "Skip count cannot be negative.")
         return
 
-    if session_mgr.get(chat.id) or chat.id in pending_quiz_settings:
-        await safe_send_message(ctx, chat.id, "⚠️ A quiz or quiz setup is already active here. Finish it or use /stop first.")
+    if session_mgr.get(chat.id):
+        await safe_send_message(ctx, chat.id, "⚠️ A quiz is already active here. Finish it or use /stop first.")
         return
+    pending_quiz_settings.pop(chat.id, None)
     if not await rate_limiter.check(user.id):
         await safe_send_message(ctx, chat.id, "⏱️ Too many requests. Please wait a moment.")
         return
@@ -1657,6 +1657,99 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+
+async def mystats_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the invoking user's personal quiz statistics."""
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+    try:
+        db = get_db()
+        stats = await AttemptRepository(db).get_user_stats(user.id)
+        mistake_count = await MistakeRepository(db).count_for_user(user.id)
+        text = (
+            f"📊 <b>Your Quiz Stats</b>\n\n"
+            f"• Total attempts: <b>{stats['total_attempts']}</b>\n"
+            f"• Completed quizzes: <b>{stats['completed_attempts']}</b>\n"
+            f"• Questions answered: <b>{stats['total_questions']}</b>\n"
+            f"• Average score: <b>{stats['avg_score']}</b>\n"
+            f"• Best score: <b>{stats['best_score']}</b>\n"
+            f"• Saved mistakes: <b>{mistake_count}</b>\n\n"
+            f"Use /mistakes to review your recent wrong answers."
+        )
+        await safe_send_message(
+            ctx, message.chat_id, text,
+            parse_mode=ParseMode.HTML,
+            thread_id=_get_topic_thread_id(update),
+        )
+    except Exception as e:
+        logger.error("mystats_command error: %s", e, exc_info=True)
+        await safe_send_message(ctx, message.chat_id, "❌ Could not load your stats right now.")
+
+
+async def mistakes_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """List recent mistakes or clear them with `/mistakes clear`."""
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user:
+        return
+    try:
+        db = get_db()
+        mistake_repo = MistakeRepository(db)
+        args = list(ctx.args or [])
+        if args and args[0].lower() == "clear":
+            removed = await mistake_repo.clear_for_user(user.id)
+            await safe_send_message(
+                ctx, message.chat_id,
+                f"🧹 Cleared <b>{removed}</b> saved mistake(s).",
+                parse_mode=ParseMode.HTML,
+                thread_id=_get_topic_thread_id(update),
+            )
+            return
+
+        mistakes = await mistake_repo.list_for_user(user.id, limit=10)
+        if not mistakes:
+            await safe_send_message(
+                ctx, message.chat_id,
+                "✨ <b>No saved mistakes!</b> You're all caught up.",
+                parse_mode=ParseMode.HTML,
+                thread_id=_get_topic_thread_id(update),
+            )
+            return
+
+        quiz_repo = QuizRepository(db)
+        quiz_cache: dict[str, Optional[dict]] = {}
+        lines = ["📝 <b>Your Recent Mistakes</b> (latest 10)\n"]
+        for i, m in enumerate(mistakes, 1):
+            qid = m.get("qid", "")
+            q_index = int(m.get("q_index", 0))
+            wrong_count = int(m.get("wrong_count", 1))
+            if qid not in quiz_cache:
+                quiz_cache[qid] = await quiz_repo.get(qid)
+            quiz = quiz_cache[qid]
+            q_title = escape(str((quiz or {}).get("quiz_name") or qid))
+            questions = (quiz or {}).get("questions") or []
+            q_snippet = ""
+            if 0 <= q_index < len(questions):
+                raw_q = str(questions[q_index].get("question") or "").strip().replace("\n", " ")
+                if len(raw_q) > 90:
+                    raw_q = raw_q[:87] + "..."
+                q_snippet = f"\n   <i>{escape(raw_q)}</i>"
+            lines.append(
+                f"{i}. <b>{q_title}</b> (Q{q_index + 1}, missed {wrong_count}×) — <code>/start {escape(qid)}</code>{q_snippet}"
+            )
+        lines.append("\nUse <code>/mistakes clear</code> to reset your mistake log.")
+        await safe_send_message(
+            ctx, message.chat_id, "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            thread_id=_get_topic_thread_id(update),
+        )
+    except Exception as e:
+        logger.error("mistakes_command error: %s", e, exc_info=True)
+        await safe_send_message(ctx, message.chat_id, "❌ Could not load your mistakes right now.")
+
+
 async def poll_answer_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     answer = update.poll_answer
     if not answer:
@@ -1687,4 +1780,6 @@ def register(application: Application) -> None:
     application.add_handler(CommandHandler("normal", normal_command))
     application.add_handler(CommandHandler("timer", timer_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    application.add_handler(CommandHandler("mystats", mystats_command))
+    application.add_handler(CommandHandler("mistakes", mistakes_command))
     application.add_handler(PollAnswerHandler(poll_answer_handler))

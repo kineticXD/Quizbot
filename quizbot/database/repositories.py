@@ -578,6 +578,48 @@ class AttemptRepository:
         return [_clean(r) async for r in cursor]
 
 
+    async def get_user_stats(self, user_id: int) -> dict:
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {
+                "$group": {
+                    "_id": "$user_id",
+                    "total_attempts": {"$sum": 1},
+                    "completed_attempts": {
+                        "$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}
+                    },
+                    "best_score": {"$max": "$score"},
+                    "avg_score": {
+                        "$avg": {
+                            "$cond": [
+                                {"$eq": ["$status", "completed"]},
+                                "$score",
+                                None,
+                            ]
+                        }
+                    },
+                    "total_questions": {"$sum": "$current_question"},
+                }
+            },
+        ]
+        rows = [doc async for doc in self.col.aggregate(pipeline)]
+        if not rows:
+            return {
+                "total_attempts": 0,
+                "completed_attempts": 0,
+                "best_score": 0,
+                "avg_score": 0.0,
+                "total_questions": 0,
+            }
+        row = rows[0]
+        return {
+            "total_attempts": int(row.get("total_attempts") or 0),
+            "completed_attempts": int(row.get("completed_attempts") or 0),
+            "best_score": round(float(row.get("best_score") or 0), 2),
+            "avg_score": round(float(row.get("avg_score") or 0), 2),
+            "total_questions": int(row.get("total_questions") or 0),
+        }
+
 class LeaderboardRepository:
     def __init__(self, db: Database):
         self.db = db
@@ -721,31 +763,41 @@ class MistakeRepository:
         self.col = db.collection("user_mistakes")
 
     async def record(self, user_id: int, items: list[dict]) -> None:
-        for item in items:
-            existing = await self.col.find_one(
-                {"user_id": user_id, "qid": item["qid"], "q_index": item["index"]}
-            )
-            if existing:
-                await self.col.update_one(
-                    {"_id": existing["_id"]},
-                    {"$inc": {"wrong_count": 1}, "$set": {"last_wrong_at": _now_iso()}},
-                )
-            else:
-                await self.col.insert_one(
-                    {
+        if not items:
+            return
+        from pymongo import UpdateOne
+
+        now = _now_iso()
+        ops = [
+            UpdateOne(
+                {"user_id": user_id, "qid": item["qid"], "q_index": item["index"]},
+                {
+                    "$inc": {"wrong_count": 1},
+                    "$set": {"last_wrong_at": now},
+                    "$setOnInsert": {
                         "user_id": user_id,
                         "qid": item["qid"],
                         "q_index": item["index"],
-                        "wrong_count": 1,
-                        "last_wrong_at": _now_iso(),
-                    }
-                )
+                    },
+                },
+                upsert=True,
+            )
+            for item in items
+        ]
+        await self.col.bulk_write(ops, ordered=False)
 
     async def list_for_user(self, user_id: int, limit: int = 20) -> list[dict]:
         cursor = (
             self.col.find({"user_id": user_id}).sort("last_wrong_at", -1).limit(limit)
         )
         return [_clean(r) async for r in cursor]
+
+    async def count_for_user(self, user_id: int) -> int:
+        return int(await self.col.count_documents({"user_id": user_id}))
+
+    async def clear_for_user(self, user_id: int) -> int:
+        res = await self.col.delete_many({"user_id": user_id})
+        return int(getattr(res, "deleted_count", 0))
 
     async def resolve(self, user_id: int, qid: str, q_index: int) -> None:
         await self.col.delete_one({"user_id": user_id, "qid": qid, "q_index": q_index})

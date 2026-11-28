@@ -33,7 +33,9 @@ HELP_TEXT = (
     "/pause, /resume, /stop — control a running quiz\n"
     "/slow, /fast, /normal — adjust quiz speed\n"
     "/timer &lt;seconds&gt; — set a quiz timer\n"
-    "/leaderboard — show live standings\n\n"
+    "/leaderboard — show live standings\n"
+    "/mystats — view your quiz stats &amp; accuracy\n"
+    "/mistakes — review your recent mistakes\n\n"
     "<b>Permanent poll quizzes</b>\n"
     "/pollquiz &lt;quiz_id&gt; [anonymous|public] — publish forwardable polls\n"
     "/polltarget — save the current forum topic as poll destination\n"
@@ -213,6 +215,11 @@ async def watchdog_loop() -> None:
             await asyncio.sleep(config.WATCHDOG_INTERVAL)
             await session_mgr.cleanup()
             rate_limiter.cleanup()
+            try:
+                from quizbot.mini_app.player_service import cleanup_expired_sessions
+                cleanup_expired_sessions()
+            except Exception:
+                pass
         except asyncio.CancelledError:
             return
         except Exception:

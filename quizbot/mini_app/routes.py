@@ -248,6 +248,8 @@ async def post_answer(
 
     bot_token = _require_bot_token()
     key = derive_session_key(bot_token, user_id, body.attempt_id)
+    if session.get("mode") == "exam":
+        return encrypt_json({"recorded": True}, key)
     return encrypt_json(result, key)
 
 

@@ -161,8 +161,9 @@ async def _call_openrouter(api_key: str, prompt: str, max_tokens: int = 4096) ->
     )
     if status == 200:
         content = data["choices"][0]["message"]["content"].strip()
-        if content and content.startswith("["):
-            return content
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
+        if cleaned and "[" in cleaned:
+            return cleaned
         raise RuntimeError(f"Non-JSON response from openrouter/free: {content[:200]}")
     if status in (429, 503, 529):
         raise RuntimeError(f"OpenRouter free router rate-limited ({status}): {str(data)[:300]}")
@@ -186,6 +187,39 @@ async def _call_pollinations(prompt: str, max_tokens: int = 4096) -> str:
     return data["choices"][0]["message"]["content"].strip()
 
 
+async def _call_openai_compatible(
+    url: str, model: str, api_key: str, prompt: str, max_tokens: int, provider_label: str
+) -> str:
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are an expert quiz question generator. Output only the formatted questions."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+    }
+    status, data = await request_json(
+        "POST", url, json_body=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    )
+    if status != 200:
+        raise RuntimeError(f"{provider_label} {status}: {str(data)[:300]}")
+    return data["choices"][0]["message"]["content"].strip()
+
+
+async def _call_openai(api_key: str, prompt: str, max_tokens: int = 4096) -> str:
+    return await _call_openai_compatible(
+        config.OPENAI_URL, "gpt-4o-mini", api_key, prompt, max_tokens, "OpenAI"
+    )
+
+
+async def _call_mistral(api_key: str, prompt: str, max_tokens: int = 4096) -> str:
+    return await _call_openai_compatible(
+        config.MISTRAL_URL, "mistral-small-latest", api_key, prompt, max_tokens, "Mistral"
+    )
+
+
 async def _try_call(provider: str, api_key: str, prompt: str, max_tokens: int) -> str:
     if provider == "gemini":
         return await _call_gemini(api_key, prompt, max_tokens)
@@ -193,6 +227,12 @@ async def _try_call(provider: str, api_key: str, prompt: str, max_tokens: int) -
         return await _call_groq(api_key, prompt, max_tokens)
     if provider == "openrouter":
         return await _call_openrouter(api_key, prompt, max_tokens)
+    if provider == "openai":
+        return await _call_openai(api_key, prompt, max_tokens)
+    if provider == "mistral":
+        return await _call_mistral(api_key, prompt, max_tokens)
+    if provider == "pollinations":
+        return await _call_pollinations(prompt, max_tokens)
     raise ValueError(f"Unknown provider {provider}")
 
 
@@ -215,7 +255,7 @@ async def ai_generate(user_id: int, prompt: str, max_tokens: int = 4096) -> str:
                 await _mark_key(cached["key_id"], failed=True)
             last_working_ai.pop(user_id, None)
 
-    for provider in ("gemini", "groq", "openrouter"):
+    for provider in ("gemini", "groq", "openrouter", "openai", "mistral"):
         keys = await get_provider_keys(user_id, provider)
         for k in keys:
             try:
@@ -247,10 +287,10 @@ def parse_ai_questions(raw: str) -> list[dict]:
     questions: list[dict] = []
 
     clean = re.sub(r"```(?:json)?\s*", "", raw).strip()
-    json_match = re.search(r"\[.*\]", clean, re.DOTALL)
-    if json_match:
+    arr_start = clean.find("[")
+    if arr_start != -1:
         try:
-            data = json.loads(json_match.group(0))
+            data, _ = json.JSONDecoder().raw_decode(clean, arr_start)
             if isinstance(data, list):
                 for obj in data:
                     if not isinstance(obj, dict):

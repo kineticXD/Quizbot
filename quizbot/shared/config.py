@@ -140,9 +140,11 @@ OPENROUTER_DEFAULT_KEYS: list[str] = [
 ]
 GEMINI_URL: str = _env(
     "GEMINI_URL",
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
 )
 GROQ_URL: str = _env("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
+OPENAI_URL: str = _env("OPENAI_URL", "https://api.openai.com/v1/chat/completions")
+MISTRAL_URL: str = _env("MISTRAL_URL", "https://api.mistral.ai/v1/chat/completions")
 POLLINATIONS_URL: str = _env("POLLINATIONS_URL", "https://text.pollinations.ai/openai")
 
 # ---------------------------------------------------------------------------
@@ -159,9 +161,6 @@ SESSION_CLEANUP_INTERVAL: int = _env_int("SESSION_CLEANUP_INTERVAL", 600)
 # many seconds (and wrong) count toward the anti-cheat flag.
 CHEAT_SPEED_THRESHOLD: float = float(_env("CHEAT_SPEED_THRESHOLD", "3.0"))
 WATCHDOG_INTERVAL: int = _env_int("WATCHDOG_INTERVAL", 300)
-# Poll-quiz questions auto-close; the final leaderboard is published automatically.
-# Default: 60 minutes. Per-quiz `/pollquiz ID MINUTES` overrides this value.
-POLLQUIZ_AUTO_CLOSE_SECONDS: int = _env_int("POLLQUIZ_AUTO_CLOSE_SECONDS", 3600)
 
 # Creator Bot's three named rate-limit buckets (hits, window_seconds).
 # Defaults match the original adv2.py's hardcoded RATE_LIMITS exactly:

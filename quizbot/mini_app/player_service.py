@@ -20,6 +20,7 @@ from quizbot.database import (
     QuizRepository,
     get_db,
 )
+from quizbot.shared import config
 from quizbot.runner_bot.quiz_utils import (
     get_section_for_question,
     is_correct,
@@ -55,6 +56,17 @@ class SessionOverrides:
 _sessions: dict[str, dict[str, Any]] = {}
 
 
+
+def cleanup_expired_sessions(max_age_seconds: Optional[int] = None) -> int:
+    """Evict abandoned in-memory Mini App sessions older than TTL."""
+    ttl = max_age_seconds if max_age_seconds is not None else max(config.SESSION_TIMEOUT, 7200)
+    now = time.time()
+    expired = [aid for aid, s in _sessions.items() if now - s.get("created_at", now) > ttl]
+    for aid in expired:
+        _sessions.pop(aid, None)
+    return len(expired)
+
+
 async def start_session(
     user_id: int,
     username: str,
@@ -73,6 +85,7 @@ async def start_session(
     individually isn't offered by the start-options screen); the top-level
     override still applies to any question outside a section.
     """
+    cleanup_expired_sessions()
     quiz = await QuizRepository(get_db()).get(qid)
     if not quiz or not quiz.get("questions"):
         return None
@@ -158,7 +171,7 @@ def public_question(session: dict, position: int) -> Optional[dict]:
     q_idx = order[position]
     q = session["quiz"]["questions"][q_idx]
     pq = session["per_question"][q_idx]
-    session["sent_at"][q_idx] = time.time()
+    session["sent_at"].setdefault(q_idx, time.time())
     return {
         "position": position,
         "total": len(order),
@@ -236,8 +249,9 @@ async def complete_session(attempt_id: str) -> Optional[dict]:
     wrong_count = len(answers) - correct_count
 
     attempt_repo = AttemptRepository(get_db())
-    await attempt_repo.update(attempt_id, current_question=len(session["order"]), score=round(total_score))
-    await attempt_repo.complete(attempt_id, score=round(total_score), username=session["username"])
+    final_score = round(total_score, 2)
+    await attempt_repo.update(attempt_id, current_question=len(session["order"]), score=final_score)
+    await attempt_repo.complete(attempt_id, score=final_score, username=session["username"])
 
     qid = session["qid"]
     stats_repo = QuestionStatsRepository(get_db())

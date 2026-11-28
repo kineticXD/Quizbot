@@ -592,6 +592,15 @@
   .review-opt .rtag { font-size: 10px; font-weight: 700; opacity: 0.75; display: block; margin-top: 2px; }
   .review-explanation { margin-top: 8px; font-size: 12.5px; color: var(--tg-hint); background: var(--tg-bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; }
 
+  .review-filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 12px; }
+  .review-filter-btn {
+    padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--line); background: var(--tg-sec-bg); color: var(--tg-text);
+    cursor: pointer; transition: all 0.15s ease;
+  }
+  .review-filter-btn.active {
+    background: var(--tg-btn); color: var(--tg-btn-text); border-color: var(--tg-btn);
+  }
   .footer-space { height: 24px; }
 
   #confetti-canvas {
@@ -1988,6 +1997,30 @@
       var rTitle = el("div", "review-title", "Question Review");
       reviewSection.appendChild(rTitle);
 
+      var filterBar = el("div", "review-filters");
+      var reviewCards = [];
+      var wrongCountRev = data.review.filter(function (it) { return it.selected && it.selected.length && !it.correct; }).length;
+      var skipCountRev = data.review.filter(function (it) { return !it.selected || !it.selected.length; }).length;
+      [
+        { key: "all", label: "All (" + data.review.length + ")" },
+        { key: "bad", label: "Incorrect (" + wrongCountRev + ")" },
+        { key: "skip", label: "Skipped (" + skipCountRev + ")" }
+      ].forEach(function (f, fIdx) {
+        var fbtn = el("button", "review-filter-btn" + (fIdx === 0 ? " active" : ""), f.label);
+        fbtn.type = "button";
+        fbtn.addEventListener("click", function () {
+          Array.prototype.slice.call(filterBar.querySelectorAll(".review-filter-btn")).forEach(function (b) {
+            b.classList.remove("active");
+          });
+          fbtn.classList.add("active");
+          reviewCards.forEach(function (entry) {
+            entry.el.classList.toggle("hidden", f.key !== "all" && entry.kind !== f.key);
+          });
+        });
+        filterBar.appendChild(fbtn);
+      });
+      reviewSection.appendChild(filterBar);
+
       data.review.forEach(function (item) {
         var card = el("div", "review-item");
         var head = el("div", "review-item-head");
@@ -2037,6 +2070,7 @@
           card.appendChild(exp);
         }
 
+        reviewCards.push({ el: card, kind: badgeCls });
         reviewSection.appendChild(card);
       });
 
@@ -2157,6 +2191,25 @@
   }
 
   /* ============ Kickoff ============ */
+  document.addEventListener("keydown", function (ev) {
+    var tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "textarea") return;
+    var playView = qs("view-play");
+    if (!playView || playView.classList.contains("hidden")) return;
+    var card = qs("q-card-slot") && qs("q-card-slot").querySelector(".q-card");
+    if (!card) return;
+    if (ev.key >= "1" && ev.key <= "9") {
+      var idx = Number(ev.key) - 1;
+      var btns = card._btns || [];
+      if (btns[idx] && !btns[idx].classList.contains("locked")) {
+        btns[idx].click();
+      }
+    } else if (ev.key === "Enter") {
+      var nextBtn = card.querySelector(".bottom-actions .primary-btn");
+      if (nextBtn) nextBtn.click();
+    }
+  });
+
   boot();
 
 })();

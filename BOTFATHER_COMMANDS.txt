@@ -51,7 +51,12 @@ pollquiz - Publish a timed poll quiz
 quizpoll - Alias for pollquiz
 publish - Alias for pollquiz
 pollsettings - Configure timed poll defaults
+polltarget - Choose the forum topic for polls
 pollstop - Stop a timed poll quiz
+pollclose - Close published polls without results
+pollfinish - Close polls and publish leaderboard
+mystats - View your quiz statistics
+mistakes - Review your recent quiz mistakes
 schedule - Schedule a quiz or timed poll
 viewschedule - View scheduled quizzes
 myschedules - View your schedules
